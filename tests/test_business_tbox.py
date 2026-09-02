@@ -8,7 +8,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from ontos import domain_business as biz
-from ontos.domain_business import ENTITIES, LINKS, to_spec, cost_rollup
+from ontos.domain_business import ENTITIES, LINKS, to_spec, cost_rollup, receivable_status
 from ontos.registry import functions
 
 
@@ -53,13 +53,53 @@ def test_spec_shape():
     # 兼容 9006 /spec 历史字段
     assert set(spec["concepts"].keys()) == set(ENTITIES.keys())
     assert len(spec["relations"]) == len(LINKS)
-    # Function 含成本预警 + 成本聚合
+    # Function 含成本预警 + 成本聚合 + 应收状态
     fids = {f["id"] for f in spec["functions"]}
-    assert {"F-project-cost-warning", "F-cost-rollup"} <= fids
-    # Action 含采购/收支/成本明细/里程碑
+    assert {"F-project-cost-warning", "F-cost-rollup", "F-receivable-status"} <= fids
+    # Action 含采购/收支/成本明细/里程碑/确认产值
     aids = {a["id"] for a in spec["actions"]}
     assert {"createProcurement", "recordPayment", "recordReceipt",
-            "addCostItem", "completeMilestone"} <= aids
+            "addCostItem", "completeMilestone", "confirmMilestoneValue"} <= aids
+
+
+def test_receivable_lifecycle():
+    # 里程碑确认产值 → 据此开票(2026-01-01) → 账期 60 天(到期 2026-03-02) → 部分回款
+    inv = "2026-01-01"
+    due = "2026-03-02"          # 开票日 + 60 天
+    today = "2026-03-10"        # 已逾期 8 天
+    # 状态：已收>=应收? 否；已收>0? 部分回款 40/100 → 部分（≠逾期，因已有回款）
+    r1 = receivable_status(invoice_date=inv, due_date=due, amount=100.0,
+                           received_amount=40.0, received_date="2026-02-15", today=today)
+    assert r1["status"] == "部分", r1
+    assert r1["remain"] == 60.0, r1
+    # 未回款且超期 → 逾期
+    r2 = receivable_status(invoice_date=inv, due_date=due, amount=100.0,
+                           received_amount=0.0, today=today)
+    assert r2["status"] == "逾期", r2
+    assert r2["overdue_days"] == 8, r2
+    assert r2["aging_bucket"] == "61-90天", r2
+    # 全额回款 → 已收
+    r3 = receivable_status(invoice_date=inv, due_date=due, amount=100.0,
+                           received_amount=100.0, received_date="2026-02-01", today=today)
+    assert r3["status"] == "已收", r3
+    # 未到账期未回款 → 待收
+    r4 = receivable_status(invoice_date=inv, due_date=due, amount=100.0,
+                           received_amount=0.0, today="2026-01-20")
+    assert r4["status"] == "待收", r4
+    # 经注册表调用一致
+    reg = functions.call("F-receivable-status", invoice_date=inv, due_date=due,
+                         amount=100.0, received_amount=0.0, today=today)
+    assert reg == r2, reg
+    # 实体属性已含产值来源/发票/账期/回款状态
+    rec = ENTITIES["Receipt"]
+    rec_attrs = {a.name for a in rec.attributes}
+    assert {"source_milestone", "invoice_no", "invoice_date", "due_date",
+            "received_amount", "received_date", "status"} <= rec_attrs, rec_attrs
+    assert ENTITIES["Milestone"].attributes[-1].name == "value"
+    # 关系：里程碑→回款（产值来源）
+    preds = {l["predicate"] for l in LINKS}
+    assert {"realizesReceivable", "sourceMilestone", "payableFrom", "sourceProcurement"} <= preds
+    print("[OK] 应收/回款生命周期：状态/账龄/逾期 + 实体属性 + 关系 全部通过")
 
 
 if __name__ == "__main__":
@@ -67,4 +107,5 @@ if __name__ == "__main__":
     test_links_cardinality()
     test_cost_rollup_model()
     test_spec_shape()
+    test_receivable_lifecycle()
     print("ALL TBOX TESTS PASSED")

@@ -8,9 +8,12 @@
 业务对齐结论（2026-09-03 与用户拍板）：
 - 顶层实体：商机 / 合同 / 项目 / 人员 / 供应商（供应商单列，不与人员混淆）。
 - 项目关联子实体：采购 Procurement / 里程碑 Milestone / 收款 Receipt / 付款 Payment
-  / 成本明细 CostItem（生命周期依附项目，但有独立编号+状态+多属性）。
+  / 成本明细 CostItem（生命周期依附项目，独立编号+状态+多属性）。
+- **收款/付款是经营对象实体，不是流水集合**：里程碑达成确认产值 → 开票 → 约定账期 →
+  回款/付款（可分期、可逾期）。单条记录是实体，聚合「合同收款/付款」由 1:N 关系派生。
 - 成本 = 派生度量：Project.current_cost = ΣPayment + ΣCostItem（用户确认要追明细）。
-- 收款(流入/回款) 与 付款(流出) 拆为两个子实体（方向不同、来源系统不同）。
+- 收款(流入/回款) 与 付款(流出) 拆为两个子实体（方向不同、来源不同：收款源自里程碑产值、
+  付款源自采购交付）。
 - 人员角色不另立实体，用「关系 + role 限定」表达（销售负责人/项目经理/工程师）。
 
 设计原则（与 v1.2 总纲一致）：
@@ -115,10 +118,11 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("amount", "number", False, False, "procurement.amount", "金额"),
             Attribute("status", "enum", False, False, "procurement.status", "询价/审批/下单/到货/验收"),
         ],
-        relations=["hasProcurement_inv", "placedWith"],
+        relations=["hasProcurement_inv", "placedWith", "payableFrom"],
     ),
     "Milestone": Entity(
-        name="Milestone", kind="child", parent="Project", desc="里程碑（挂项目）",
+        name="Milestone", kind="child", parent="Project",
+        desc="里程碑（挂项目；达成初验即确认产值，据此生成应收/回款单）",
         attributes=[
             Attribute("ms_no", "string", True, True, "milestone.ms_no", "里程碑编号"),
             Attribute("name", "string", True, False, "milestone.name", "里程碑名称"),
@@ -126,30 +130,45 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("actual_date", "date", False, False, "milestone.actual_date", "实际日期"),
             Attribute("status", "enum", False, False, "milestone.status", "未开始/进行中/已完成/风险"),
             Attribute("acceptance", "string", False, False, "milestone.acceptance", "验收结论"),
+            Attribute("value", "number", False, False, "milestone.value", "里程碑对应产值(合同额分摊)"),
         ],
-        relations=["hasMilestone_inv"],
+        relations=["hasMilestone_inv", "realizesReceivable"],
     ),
     "Receipt": Entity(
-        name="Receipt", kind="child", parent="Contract", desc="收款（客户→我方，流入/回款）",
+        name="Receipt", kind="child", parent="Contract",
+        desc="收款/回款单（经营对象：里程碑确认产值→开票→账期→回款；可分期、可逾期）",
         attributes=[
             Attribute("receipt_no", "string", True, True, "receipt.receipt_no", "收款单号"),
-            Attribute("amount", "number", False, False, "receipt.amount", "金额"),
-            Attribute("date", "date", False, False, "receipt.date", "到账日期"),
+            Attribute("source_milestone", "string", False, False, "receipt.source_milestone", "产值来源里程碑(ms_no)"),
+            Attribute("amount", "number", False, False, "receipt.amount", "应收/开票金额"),
+            Attribute("invoice_no", "string", False, False, "receipt.invoice_no", "发票号"),
+            Attribute("invoice_date", "date", False, False, "receipt.invoice_date", "开票日"),
+            Attribute("invoiced", "enum", False, False, "receipt.invoiced", "未开票/已开票"),
+            Attribute("due_date", "date", False, False, "receipt.due_date", "到期日(账期截止)"),
+            Attribute("received_amount", "number", False, False, "receipt.received_amount", "已回款金额"),
+            Attribute("received_date", "date", False, False, "receipt.received_date", "回款日"),
             Attribute("payer", "string", False, False, "receipt.payer", "付款方(客户)"),
-            Attribute("status", "enum", False, False, "receipt.status", "待收/已收/退票"),
+            Attribute("status", "enum", False, False, "receipt.status", "待收/部分/已收/逾期"),
         ],
-        relations=["hasReceipt_inv"],
+        relations=["hasReceipt_inv", "sourceMilestone"],
     ),
     "Payment": Entity(
-        name="Payment", kind="child", parent="Contract", desc="付款（我方→供应商/分包，流出）",
+        name="Payment", kind="child", parent="Contract",
+        desc="付款/应付单（经营对象：供应商交付→收票→账期→付款；可分期、可逾期）",
         attributes=[
             Attribute("payment_no", "string", True, True, "payment.payment_no", "付款单号"),
-            Attribute("amount", "number", False, False, "payment.amount", "金额"),
-            Attribute("date", "date", False, False, "payment.date", "付款日期"),
+            Attribute("source_po", "string", False, False, "payment.source_po", "来源采购单(po_no)"),
+            Attribute("amount", "number", False, False, "payment.amount", "应付/开票金额"),
+            Attribute("invoice_no", "string", False, False, "payment.invoice_no", "供应商发票号"),
+            Attribute("invoice_date", "date", False, False, "payment.invoice_date", "收票日"),
+            Attribute("invoiced", "enum", False, False, "payment.invoiced", "未收票/已收票"),
+            Attribute("due_date", "date", False, False, "payment.due_date", "付款到期日(账期截止)"),
+            Attribute("paid_amount", "number", False, False, "payment.paid_amount", "已付金额"),
+            Attribute("paid_date", "date", False, False, "payment.paid_date", "付款日"),
             Attribute("payee", "string", False, False, "payment.payee", "收款方(供应商)"),
-            Attribute("status", "enum", False, False, "payment.status", "待付/已付/拒付"),
+            Attribute("status", "enum", False, False, "payment.status", "待付/部分/已付/逾期"),
         ],
-        relations=["hasPayment_inv", "placedWith_inv2"],
+        relations=["hasPayment_inv", "sourceProcurement", "placedWith_inv2"],
     ),
     "CostItem": Entity(
         name="CostItem", kind="child", parent="Project", desc="成本明细（人工/其他/预提，挂项目）",
@@ -187,6 +206,14 @@ LINKS: List[Dict[str, str]] = [
      "desc": "合同收款（客户→我方，回款）"},
     {"predicate": "hasPayment", "subj": "Contract", "obj": "Payment", "card": "1:N",
      "desc": "合同/采购付款（我方→供应商，流出）"},
+    {"predicate": "realizesReceivable", "subj": "Milestone", "obj": "Receipt", "card": "1:N",
+     "desc": "里程碑达成确认产值，据此生成应收/回款单（产值来源）"},
+    {"predicate": "sourceMilestone", "subj": "Receipt", "obj": "Milestone", "card": "N:1",
+     "desc": "回款单对应的产值来源里程碑"},
+    {"predicate": "payableFrom", "subj": "Procurement", "obj": "Payment", "card": "1:N",
+     "desc": "采购到货验收确认应付，据供应商发票生成付款单"},
+    {"predicate": "sourceProcurement", "subj": "Payment", "obj": "Procurement", "card": "N:1",
+     "desc": "付款单对应的来源采购单"},
     {"predicate": "hasCostItem", "subj": "Project", "obj": "CostItem", "card": "1:N",
      "desc": "项目成本明细（人工/其他/预提）"},
     {"predicate": "signedWith", "subj": "Contract", "obj": "Supplier", "card": "N:2",
@@ -257,6 +284,64 @@ def cost_rollup(payments: List[Dict[str, Any]], cost_items: List[Dict[str, Any]]
     }
 
 
+def receivable_status(invoice_date: Optional[str] = None, due_date: Optional[str] = None,
+                      amount: float = 0.0, received_amount: float = 0.0,
+                      received_date: Optional[str] = None,
+                      today: Optional[str] = None) -> Dict[str, Any]:
+    """Function F-receivable-status 实现：应收/回款单的**状态 + 账龄 + 逾期**判定。
+
+    输入：invoice_date 开票日, due_date 到期日(账期截止), amount 应收金额,
+          received_amount 已回款, received_date 回款日, today 今天(缺省取系统日期)。
+    输出：status∈{待收,部分,已收,逾期}, remain 未回金额, overdue_days 逾期天数,
+          aging_days 账龄天数, aging_bucket 账龄区间。
+    规则：已收>=应收→已收；0<已收<应收→部分；已收=0 且 today>due_date→逾期；否则待收。
+    纯函数、无 IO（today 缺省用系统日期，仅影响未显式传参时的判定）。
+    """
+    from datetime import date as _date, datetime as _dt
+
+    def _parse(s):
+        if not s:
+            return None
+        try:
+            return _dt.strptime(str(s), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    amt = float(amount or 0)
+    recv = float(received_amount or 0)
+    remain = round(amt - recv, 2)
+    t = _parse(today) or _date.today()
+    dd = _parse(due_date)
+    overdue_days = (t - dd).days if dd is not None else None
+    # 状态判定
+    if amt > 0 and recv >= amt:
+        status = "已收"
+    elif recv > 0:
+        status = "部分"
+    elif overdue_days is not None and overdue_days > 0:
+        status = "逾期"
+    else:
+        status = "待收"
+    # 账龄区间（开票日 → 今天）
+    inv = _parse(invoice_date)
+    aging_days = (t - inv).days if inv is not None else None
+    if aging_days is None:
+        bucket = "未知"
+    elif aging_days <= 30:
+        bucket = "0-30天"
+    elif aging_days <= 60:
+        bucket = "31-60天"
+    elif aging_days <= 90:
+        bucket = "61-90天"
+    else:
+        bucket = "90天以上"
+    return {
+        "status": status, "remain": remain,
+        "overdue_days": overdue_days, "aging_days": aging_days,
+        "aging_bucket": bucket,
+    }
+
+
 _FUNCTION_DEFS = [
     Definition(
         id="F-project-cost-warning", name="项目成本预警", kind="function", domain="project",
@@ -280,9 +365,16 @@ _FUNCTION_DEFS = [
     ),
     Definition(
         id="F-payment-cycle", name="回款周期", kind="function", domain="financial",
-        description="合同签订到回款的天数（基于 Receipt 最近一笔到账日期）。",
-        inputs=["contract_no"], outputs=["cycle_days", "sign_date", "recv_date"],
-        invariant="cycle_days>=0", version="0.1", ontology_bound=True,
+        description="合同签订到回款的天数（基于 Receipt 最近一笔回款日；账期=开票日+账期天数）。",
+        inputs=["contract_no"], outputs=["cycle_days", "sign_date", "recv_date", "due_date"],
+        invariant="cycle_days>=0", version="0.2", ontology_bound=True,
+    ),
+    Definition(
+        id="F-receivable-status", name="应收/回款状态", kind="function", domain="financial",
+        description="基于 开票日/到期日/应收金额/已回款 判定 待收/部分/已收/逾期，并给出账龄区间与逾期天数。",
+        inputs=["invoice_date", "due_date", "amount", "received_amount", "received_date", "today"],
+        outputs=["status", "remain", "overdue_days", "aging_days", "aging_bucket"],
+        invariant="remain = amount - received_amount and remain>=0", version="0.1", ontology_bound=True,
     ),
 ]
 
@@ -316,16 +408,22 @@ ACTIONS_PROJ = {
         "不变量": ["po_no 全局唯一"], "幂等": True,
     },
     "recordPayment": {
-        "定义": "记录一笔付款（我方→供应商/分包，流出）。",
+        "定义": "记录一笔付款（我方→供应商/分包，流出；含开票/账期/已付）。",
         "条件": ["关联合同或采购订单已立"],
-        "效果": "新增 Payment，建立 hasPayment。",
-        "不变量": ["payment_no 全局唯一", "amount>=0"], "幂等": True,
+        "效果": "新增 Payment（含 source_po/发票/账期/paid_amount），建立 hasPayment + payableFrom(Procurement)。",
+        "不变量": ["payment_no 全局唯一", "amount>=0", "paid_amount<=amount"], "幂等": True,
     },
     "recordReceipt": {
-        "定义": "记录一笔收款（客户→我方，流入/回款）。",
-        "条件": ["关联合同已立"],
-        "效果": "新增 Receipt，建立 hasReceipt。",
-        "不变量": ["receipt_no 全局唯一", "amount>=0"], "幂等": True,
+        "定义": "记录一笔收款（客户→我方，流入/回款；含产值来源/开票/账期/已收）。",
+        "条件": ["关联合同已立", "source_milestone 已确认产值（realizesReceivable）"],
+        "效果": "新增 Receipt（含 source_milestone/发票/账期/received_amount），建立 hasReceipt + sourceMilestone。",
+        "不变量": ["receipt_no 全局唯一", "amount>=0", "received_amount<=amount", "invoiced=已开票 方可回款"], "幂等": True,
+    },
+    "confirmMilestoneValue": {
+        "定义": "里程碑达成（初验）确认产值(value)，建立 realizesReceivable 关系（可据此开票回款）。",
+        "条件": ["里程碑已立", "验收结论已填（acceptance）", "value>=0"],
+        "效果": "更新 Milestone.value + status=已完成；建立 realizesReceivable(Milestone→Receipt)。",
+        "不变量": ["value>=0", "未确认产值不得生成应收"], "幂等": True,
     },
     "addCostItem": {
         "定义": "追加一笔成本明细（人工/其他/预提）。",
@@ -359,6 +457,9 @@ INVARIANTS = [
     {"id": "traceable-action", "desc": "一切变更动作须可追溯到发起方（人/数字员工）并留审计"},
     {"id": "cost-rollup-nonnegative", "desc": "current_cost = ΣPayment + ΣCostItem，各项均非负"},
     {"id": "payment-receipt-distinct", "desc": "收款(流入/回款)与付款(流出)为独立实体，方向不同不得混用"},
+    {"id": "receivable-from-milestone", "desc": "回款单须源自里程碑确认的产值(source_milestone=realizesReceivable)，无产值不回款"},
+    {"id": "invoice-before-receipt", "desc": "回款/付款须先开票(invoiced=已开票)，账期自开票日起算，到期未回为逾期"},
+    {"id": "received-not-exceed-amount", "desc": "已回款/已付金额不得大于应收/应付金额"},
 ]
 
 
@@ -469,6 +570,16 @@ def _register() -> None:
             version="0.2", ontology_bound=True,
         ),
         impl=cost_rollup,
+    )
+    functions.register(
+        Definition(
+            id="F-receivable-status", name="应收/回款状态", kind="function", domain="financial",
+            description="基于 开票日/到期日/应收金额/已回款 判定 待收/部分/已收/逾期，并给出账龄区间与逾期天数。",
+            inputs=["invoice_date", "due_date", "amount", "received_amount", "received_date", "today"],
+            outputs=["status", "remain", "overdue_days", "aging_days", "aging_bucket"],
+            invariant="remain = amount - received_amount and remain>=0", version="0.1", ontology_bound=True,
+        ),
+        impl=receivable_status,
     )
     for aid, spec in ACTIONS_PROJ.items():
         actions.register(Definition(
