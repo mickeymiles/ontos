@@ -88,9 +88,10 @@ def test_registry():
                 "assignPersonnelToProject", "raiseProjectCostWarning"):
         assert actions.has(aid), aid
     # 业务实体 / 关系声明存在
-    assert set(["Project", "Opportunity", "Contract", "Personnel"]).issubset(biz.CONCEPTS.keys())
-    assert "project.hasContract(contract)" in biz.RELATIONS
-    print("[OK] 注册表契约：4 Function + 4 Action + 4 实体 + 关系 声明完整")
+    assert set(["Project", "Opportunity", "Contract", "Personnel", "Supplier"]).issubset(biz.CONCEPTS.keys())
+    assert "Contract.belongsTo(Project)" in biz.RELATIONS
+    assert "Project.managedBy(Personnel)" in biz.RELATIONS
+    print("[OK] 注册表契约：Function + Action + 实体 + 关系 声明完整")
 
 
 # ── 4) adapters 局部落地样例 ───────────────────────────────
