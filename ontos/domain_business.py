@@ -1,19 +1,32 @@
 # -*- coding: utf-8 -*-
-"""通用业务本体地基（ontos · 场景收敛锁定版 v4 · 合同/项目/里程碑/收款/付款）。
+"""通用业务本体地基（ontos · 场景收敛锁定版 v5 · 项目为核心 / 合同为过程凭证）。
 
 这是「基于本体的智能体平台」的通用业务域骨架。本文件 = **TBox（定义层）** 的
 单一真相源：实体 / 属性 / 关系 / Function / Action 的声明都写在这里（纯 Python，
 不落库；运行期只读导出，见 to_spec()）。ABox（真实数据行）在 9006 的 SQLite。
 
-═══ v4 场景收敛（2026-09-03 与用户拍板）═══
+═══ v5 核心修正（2026-09-03 用户纠正概念误区）═══
+**项目才是核心（聚合根），合同仅仅是一个"过程"——它是契约凭证，不是经营载体。**
+
+- 合同 Contract = **过程/契约凭证**：记录"合同文本、签订时间、是否归档、存放位置"等
+  凭证属性。它不承载经营执行，只回答"我们跟谁签了什么、纸面约定是什么、东西在哪"。
+- 项目 Project = **合同的执行态 / 经营聚合根**：收款、付款、里程碑、成本全部围绕项目
+  组织（而非围绕合同）。项目回答"这笔生意执行得怎么样、钱收没收回来、成本超没超"。
+- 因此 v4 中"收款/付款挂在合同下"是错的，v5 改为 **收款/付款挂项目**；
+  **合同只关联项目**（belongsTo），不直接挂收付款。
+- 一个合同可以有 **分包合同**（Contract 自关系 hasSubContract，1:N）。
+
+═══ 场景收敛（与用户拍板）═══
 当前只覆盖 **5 个财务/经营分析场景**，只构建它们直接需要的本体：
   回款周期 / 资金占用 / 项目毛利率 / 项目成本预警 / 项目 ROI。
 其余（商机/报价单/采购流程/人员/供应商主数据/成本明细实体）列入范围外（⌛），后续补充。
 
 关键定义决议：
-- 实体（5）：合同 Contract / 项目 Project / 里程碑 Milestone / 收款单 Receipt / 付款单 Payment。
+- 实体（5）：项目 Project(**核心·聚合根**) / 合同 Contract(过程·契约凭证) / 里程碑 Milestone
+            / 收款单 Receipt / 付款单 Payment。
   * 里程碑大/小均挂项目；小里程碑通过 decomposedFrom 关联大里程碑（是大里程碑的细化分解）。
   * 收款/付款是经营对象实体（非流水集合）：里程碑确认产值 → 开票 → 账期 → 回款/付款（可分期、可逾期）。
+  * 收款/付款 **挂项目**（执行态），不挂合同（凭证）。
 - 成本 = Project 的**派生度量属性**（非实体）：current_cost = ΣPayment + Σ成本明细行(ABox)。
   成本明细行保留在数据层做下钻，不在 TBox 升格为实体（待"需独立处理成本项"场景再升格）。
 - 范围外关系 / 实体仅占位，不进主 LINKS/ENTITIES 渲染（见 OUT_OF_SCOPE_* 注释）。
@@ -56,30 +69,42 @@ class Entity:
 
 # 实体定义（含结构化属性 + 来源字段映射）
 ENTITIES: Dict[str, Entity] = {
-    "Contract": Entity(
-        name="Contract", kind="top", desc="合同（法律实体，归属项目；毛利率场景需签单毛利）",
-        attributes=[
-            Attribute("contract_no", "string", True, True, "contract.contract_no", "合同号"),
-            Attribute("amount", "number", False, False, "contract.sign_amount", "签约金额"),
-            Attribute("sign_date", "date", False, False, "contract.sign_date", "签约日期"),
-            Attribute("period", "number", False, False, "contract.period", "合同周期(月)"),
-            Attribute("type", "enum", False, False, "contract.type", "主合同/变更"),
-            Attribute("sign_gross_profit", "number", False, False, "contract.sign_gross_profit", "签单毛利(○待建列)"),
-        ],
-        relations=["belongsTo", "hasReceipt", "hasPayment", "signedWith"],
-    ),
     "Project": Entity(
-        name="Project", kind="top", desc="项目（经营主数据根实体，枢纽）",
+        name="Project", kind="top",
+        desc="项目（★核心·聚合根：合同的执行态）。收款/付款/里程碑/成本全部围绕项目组织；"
+             "回答「这笔生意执行得怎么样、钱收回来没有、成本超没超」。",
         attributes=[
             Attribute("project_no", "string", True, True, "core_project.project_no", "项目编号"),
             Attribute("name", "string", True, False, "core_project.name", "项目名称"),
-            Attribute("status", "enum", False, False, "core_project.status", "进行中/已完成/关闭"),
+            Attribute("status", "enum", False, False, "core_project.status", "执行态：进行中/已完成/关闭"),
             Attribute("budget", "number", False, False, "plm_baseline.total_cost", "预算(概算/预算基线)"),
             Attribute("current_cost", "number", False, False, "(派生)=ΣPayment+Σ成本明细行(ABox)", "当前成本(派生属性)"),
             Attribute("start_date", "date", False, False, "core_project.start_date", "开始日期"),
             Attribute("end_date", "date", False, False, "core_project.end_date", "结束日期"),
         ],
-        relations=["belongsTo_inv", "hasMilestone"],
+        relations=["belongsTo_inv", "hasMilestone", "hasReceipt", "hasPayment"],
+    ),
+    "Contract": Entity(
+        name="Contract", kind="top",
+        desc="合同（过程·契约凭证，非经营载体）。记录「签了什么、跟谁签、纸面在哪」；"
+             "只关联项目，不承载收款/付款；一个合同可含分包合同。",
+        attributes=[
+            Attribute("contract_no", "string", True, True, "contract.contract_no", "合同号"),
+            Attribute("name", "string", False, False, "contract.name", "合同名称(○待建列)"),
+            Attribute("type", "enum", False, False, "contract.type", "主合同/分包合同/变更"),
+            Attribute("parent_contract_no", "string", False, False, "contract.parent_contract_no",
+                      "父合同号（分包合同指向主合同；主合同为空·○待建列）"),
+            Attribute("amount", "number", False, False, "contract.sign_amount", "签约金额"),
+            Attribute("sign_date", "date", False, False, "contract.sign_date", "签订时间"),
+            Attribute("period", "number", False, False, "contract.period", "合同周期(月)"),
+            Attribute("sign_gross_profit", "number", False, False, "contract.sign_gross_profit", "签单毛利(○待建列)"),
+            Attribute("party_a", "string", False, False, "contract.party_a", "甲方(客户)"),
+            Attribute("party_b", "string", False, False, "contract.party_b", "乙方(我方)"),
+            Attribute("doc_file", "string", False, False, "contract.doc_file", "合同文本/扫描件(○待建列)"),
+            Attribute("archived", "enum", False, False, "contract.archived", "是否归档：未归档/已归档(○待建列)"),
+            Attribute("storage_location", "string", False, False, "contract.storage_location", "存放位置(○待建列)"),
+        ],
+        relations=["belongsTo", "hasSubContract", "signedWith"],
     ),
     "Milestone": Entity(
         name="Milestone", kind="child", parent="Project",
@@ -99,8 +124,9 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasMilestone_inv", "decomposedFrom", "realizesReceivable"],
     ),
     "Receipt": Entity(
-        name="Receipt", kind="child", parent="Contract",
-        desc="收款/回款单（经营对象：里程碑确认产值→开票→账期→回款；可分期、可逾期）",
+        name="Receipt", kind="child", parent="Project",
+        desc="收款/回款单（挂【项目】——执行态的资金流入；里程碑确认产值→开票→账期→回款；"
+             "可分期、可逾期。非合同关联）",
         attributes=[
             Attribute("receipt_no", "string", True, True, "finance_detail.receipt_no", "收款单号(○待建列)"),
             Attribute("source_milestone", "string", False, False, "finance_detail.source_milestone", "产值来源里程碑(ms_no·○待建列)"),
@@ -117,8 +143,9 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasReceipt_inv", "sourceMilestone"],
     ),
     "Payment": Entity(
-        name="Payment", kind="child", parent="Contract",
-        desc="付款/应付单（经营对象：供应商交付→收票→账期→付款；可分期、可逾期；source_po ⌛待采购域）",
+        name="Payment", kind="child", parent="Project",
+        desc="付款/应付单（挂【项目】——执行态的资金流出；供应商交付→收票→账期→付款；"
+             "可分期、可逾期；source_po ⌛待采购域。非合同关联）",
         attributes=[
             Attribute("payment_no", "string", True, True, "finance_detail.payment_no", "付款单号(○待建列)"),
             Attribute("source_po", "string", False, False, "finance_detail.source_po", "来源采购单(po_no·⌛待采购域接入)"),
@@ -140,19 +167,21 @@ ENTITIES: Dict[str, Entity] = {
 # 关系（Link）：主体.谓词(客体) [基数] 说明
 LINKS: List[Dict[str, str]] = [
     {"predicate": "belongsTo", "subj": "Contract", "obj": "Project", "card": "N:1",
-     "desc": "合同归属项目（主合同+变更可 1:N）"},
+     "desc": "合同归属项目（★合同只关联项目；一个项目可有多个合同：主合同+变更+分包合同）"},
+    {"predicate": "hasSubContract", "subj": "Contract", "obj": "Contract", "card": "1:N",
+     "desc": "主合同 → 分包合同（自关系：分包合同经 parent_contract_no 指向主合同）"},
     {"predicate": "hasMilestone", "subj": "Project", "obj": "Milestone", "card": "1:N",
-     "desc": "项目里程碑（大/小均挂项目）"},
+     "desc": "项目里程碑（大/小均挂项目，属执行态）"},
     {"predicate": "decomposedFrom", "subj": "Milestone", "obj": "Milestone", "card": "N:1",
      "desc": "小里程碑(执行)按大里程碑(合同)拆解、关联父大里程碑"},
     {"predicate": "realizesReceivable", "subj": "Milestone", "obj": "Receipt", "card": "1:N",
      "desc": "大里程碑确认产值，据此生成应收/回款单（产值来源）"},
     {"predicate": "sourceMilestone", "subj": "Receipt", "obj": "Milestone", "card": "N:1",
      "desc": "回款单对应的产值来源里程碑"},
-    {"predicate": "hasReceipt", "subj": "Contract", "obj": "Receipt", "card": "1:N",
-     "desc": "合同收款（客户→我方，回款）"},
-    {"predicate": "hasPayment", "subj": "Contract", "obj": "Payment", "card": "1:N",
-     "desc": "合同/采购付款（我方→供应商，流出）"},
+    {"predicate": "hasReceipt", "subj": "Project", "obj": "Receipt", "card": "1:N",
+     "desc": "★项目收款（客户→我方，回款）——收付款挂项目(执行态)而非合同(凭证)"},
+    {"predicate": "hasPayment", "subj": "Project", "obj": "Payment", "card": "1:N",
+     "desc": "★项目付款（我方→供应商/分包，流出）——收付款挂项目(执行态)而非合同(凭证)"},
     {"predicate": "signedWith", "subj": "Contract", "obj": "Supplier", "card": "N:2",
      "desc": "合同签约方（甲方客户/乙方我方或供应商；⌛ Supplier 范围外，仅占位）"},
 ]
@@ -385,21 +414,21 @@ _FUNCTION_DEFS: List[Definition] = [
         description="合同签订到首笔回款的天数（基于 Receipt 回款日；账期=开票日+账期天数）。",
         inputs=["sign_date", "receipts"],
         outputs=["cycle_days", "sign_date", "first_recv_date", "due_date"],
-        invariant="cycle_days>=0", version="0.4", ontology_bound=True,
+        invariant="cycle_days>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-receivable-status", name="应收/回款状态", kind="function", domain="financial",
         description="基于 开票日/到期日/应收金额/已回款 判定 待收/部分/已收/逾期，并给出账龄区间与逾期天数。",
         inputs=["invoice_date", "due_date", "amount", "received_amount", "received_date", "today"],
         outputs=["status", "remain", "overdue_days", "aging_days", "aging_bucket"],
-        invariant="remain = amount - received_amount and remain>=0", version="0.4", ontology_bound=True,
+        invariant="remain = amount - received_amount and remain>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-capital-occupation", name="资金占用", kind="function", domain="financial",
         description="资金占用 = Σ已付(Payment.paid_amount) + Σ应收未收(Receipt.amount-received_amount)。",
         inputs=["payments", "receipts"],
         outputs=["occupied", "paid_total", "receivable_remain", "net"],
-        invariant="occupied = paid_total + receivable_remain and all>=0", version="0.4", ontology_bound=True,
+        invariant="occupied = paid_total + receivable_remain and all>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-project-margin", name="项目毛利率", kind="function", domain="financial",
@@ -407,27 +436,27 @@ _FUNCTION_DEFS: List[Definition] = [
         inputs=["sign_amount", "sign_gross_profit"],
         outputs=["gross_rate", "sign_amount", "sign_gross_profit"],
         invariant="sign_amount>0 implies gross_rate=sign_gross_profit/sign_amount",
-        version="0.4", ontology_bound=True,
+        version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-project-cost-warning", name="项目成本预警", kind="function", domain="project",
         description="依据 预算 与 当前成本 计算预算执行比，给出 正常/预警/超支 状态。",
         inputs=["estimate", "budget", "current_cost"],
         outputs=["status", "note", "budget_ratio", "remaining_cost"],
-        invariant="budget>=0 and current_cost>=0", version="0.4", ontology_bound=True,
+        invariant="budget>=0 and current_cost>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-cost-rollup", name="项目成本聚合", kind="function", domain="project",
         description="项目当前成本 = Σ付款(Payment) + Σ成本明细行(ABox，人工/其他/预提)。",
         inputs=["payments", "cost_detail_rows"], outputs=["current_cost", "payment_sum", "costitem_sum"],
-        invariant="current_cost = payment_sum + costitem_sum and all>=0", version="0.4", ontology_bound=True,
+        invariant="current_cost = payment_sum + costitem_sum and all>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-project-roi", name="项目ROI", kind="function", domain="financial",
         description="项目 ROI = (收益 - 当前成本) / 当前成本；收益取回款总额或合同额。",
         inputs=["revenue", "current_cost"], outputs=["roi", "revenue", "current_cost"],
         invariant="current_cost>0 implies roi=(revenue-current_cost)/current_cost",
-        version="0.4", ontology_bound=True,
+        version="0.5", ontology_bound=True,
     ),
 ]
 
@@ -448,16 +477,24 @@ _FUNCTION_IMPLS = {
 # ═══════════════════════════════════════════════════════════════════════
 ACTIONS_PROJ = {
     "recordReceipt": {
-        "定义": "记录一笔收款（客户→我方，流入/回款；含产值来源/开票/账期/已收）。",
-        "条件": ["关联合同已立", "source_milestone 已确认产值（realizesReceivable）"],
-        "效果": "新增 Receipt（含 source_milestone/发票/账期/received_amount），建立 hasReceipt + sourceMilestone。",
+        "定义": "记录一笔收款（客户→我方，流入/回款；含产值来源/开票/账期/已收）。挂【项目】。",
+        "条件": ["关联项目已立", "source_milestone 已确认产值（realizesReceivable）"],
+        "效果": "新增 Receipt（挂项目；含 source_milestone/发票/账期/received_amount），"
+                "建立 hasReceipt(Project→Receipt) + sourceMilestone。",
         "不变量": ["receipt_no 全局唯一", "amount>=0", "received_amount<=amount", "invoiced=已开票 方可回款"], "幂等": True,
     },
     "recordPayment": {
-        "定义": "记录一笔付款（我方→供应商/分包，流出；含开票/账期/已付；source_po ⌛待采购域）。",
-        "条件": ["关联合同已立"],
-        "效果": "新增 Payment（含发票/账期/paid_amount），建立 hasPayment。",
+        "定义": "记录一笔付款（我方→供应商/分包，流出；含开票/账期/已付；source_po ⌛待采购域）。挂【项目】。",
+        "条件": ["关联项目已立"],
+        "效果": "新增 Payment（挂项目；含发票/账期/paid_amount），建立 hasPayment(Project→Payment)。",
         "不变量": ["payment_no 全局唯一", "amount>=0", "paid_amount<=amount"], "幂等": True,
+    },
+    "createSubContract": {
+        "定义": "在主合同下签订分包合同（过程凭证：记录分包契约与归档信息；不直接产生收付款）。",
+        "条件": ["主合同已立"],
+        "效果": "新增 Contract(type=分包合同, parent_contract_no=主合同号)，建立 hasSubContract(主→分包)。",
+        "不变量": ["contract_no 全局唯一", "parent_contract_no 必须指向已存在的合同",
+                 "不得自引用（合同不能是自己的父合同）", "分包合同仍须 belongsTo 某项目"], "幂等": True,
     },
     "confirmMilestoneValue": {
         "定义": "大里程碑达成（初验）确认产值(value)，建立 realizesReceivable 关系（可据此开票回款）。",
@@ -500,6 +537,11 @@ INVARIANTS = [
     {"id": "received-not-exceed-amount", "desc": "已回款/已付金额不得大于应收/应付金额"},
     {"id": "milestone-level-model", "desc": "小里程碑须通过 decomposedFrom 关联大里程碑（大里程碑确认产值，小里程碑跟踪执行）"},
     {"id": "capital-occupation-nonnegative", "desc": "资金占用各项(已付/应收未收/净占用)均非负"},
+    # ── v5 核心修正：项目为核心（执行态），合同为过程（契约凭证）──
+    {"id": "project-is-root", "desc": "★项目是经营聚合根：收款/付款/里程碑/成本全部挂项目（执行态），不得挂在合同下"},
+    {"id": "contract-is-process", "desc": "★合同是过程/契约凭证：只关联项目(belongsTo)，不直接承载收款/付款；"
+                                         "须记录合同文本·签订时间·是否归档·存放位置"},
+    {"id": "subcontract-parent-valid", "desc": "分包合同须经 hasSubContract 指向已存在的主合同，且不得自引用"},
 ]
 
 
@@ -529,8 +571,11 @@ def validate_project_action(action_id: str, abox: Dict[str, Any]) -> Tuple[bool,
     status = abox.get("status") or ""
     closed = status.upper() in ("CLOSED", "ARCHIVED", "CANCELLED")
     facts = {
+        # v5：收付款挂项目（执行态），故前置以「项目已立」为准
         "项目已立": has_proj,
-        "关联合同已立": bool(abox.get("contract_no")),
+        "关联项目已立": has_proj,
+        "关联合同已立": bool(abox.get("contract_no")),   # 兼容历史条件串
+        "主合同已立": bool(abox.get("contract_no")),     # createSubContract 前置
         "source_milestone 已确认产值（realizesReceivable）": True,  # 细则由 ABox 校验器后续加强
         "里程碑已立(且 level=major)": has_proj,
         "里程碑已立": has_proj,
@@ -593,7 +638,7 @@ def _register() -> None:
             description=spec.get("定义", ""),
             inputs=list(spec.get("条件", [])),
             invariant="; ".join(spec.get("不变量", [])) or None,
-            version="0.4", ontology_bound=True,
+            version="0.5", ontology_bound=True,
             meta={"效果": spec.get("效果", ""), "幂等": spec.get("幂等", True)},
         ))
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""业务 TBox 结构化 + 成本聚合 + 新增 Function + to_spec 测试（v4 场景收敛版）。"""
+"""业务 TBox 结构化 + 成本聚合 + 新增 Function + to_spec 测试（v5 项目为核心版）。"""
 import os
 import sys
 
@@ -8,7 +8,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from ontos import domain_business as biz
-from ontos.domain_business import ENTITIES, LINKS, to_spec, cost_rollup, receivable_status
+from ontos.domain_business import (ENTITIES, LINKS, INVARIANTS, to_spec, cost_rollup,
+                                   receivable_status)
 from ontos.registry import functions
 
 
@@ -22,12 +23,47 @@ def test_entities_v4():
         assert any(a.unique for a in e.attributes), f"{name} 缺唯一主键属性"
 
 
-def test_links_v4():
+def test_links_v5():
     preds = {l["predicate"] for l in LINKS}
     for need in ["belongsTo", "hasMilestone", "decomposedFrom",
                  "realizesReceivable", "sourceMilestone", "hasReceipt",
-                 "hasPayment", "signedWith"]:
+                 "hasPayment", "signedWith", "hasSubContract"]:
         assert need in preds, f"缺关系 {need}"
+
+
+def test_project_is_root_v5():
+    """v5 核心修正：项目=执行态聚合根，合同=过程/契约凭证（不承载收付款）。"""
+    by_pred = {l["predicate"]: l for l in LINKS}
+
+    # 1) 收款/付款挂【项目】，不挂合同
+    assert by_pred["hasReceipt"]["subj"] == "Project", by_pred["hasReceipt"]
+    assert by_pred["hasPayment"]["subj"] == "Project", by_pred["hasPayment"]
+    assert ENTITIES["Receipt"].parent == "Project"
+    assert ENTITIES["Payment"].parent == "Project"
+
+    # 2) 合同只关联项目：关系里不得出现收付款
+    c_rels = set(ENTITIES["Contract"].relations)
+    assert "hasReceipt" not in c_rels and "hasPayment" not in c_rels, c_rels
+    assert "belongsTo" in c_rels, c_rels
+
+    # 3) 项目聚合根：关系含 里程碑/收款/付款
+    p_rels = set(ENTITIES["Project"].relations)
+    assert {"hasMilestone", "hasReceipt", "hasPayment"} <= p_rels, p_rels
+
+    # 4) 合同是凭证：须含 文本 / 是否归档 / 存放位置 / 签订时间
+    c_attrs = {a.name for a in ENTITIES["Contract"].attributes}
+    assert {"doc_file", "archived", "storage_location", "sign_date"} <= c_attrs, c_attrs
+
+    # 5) 分包合同：Contract 自关系 + parent_contract_no
+    assert by_pred["hasSubContract"]["subj"] == "Contract"
+    assert by_pred["hasSubContract"]["obj"] == "Contract"
+    assert "parent_contract_no" in c_attrs
+
+    # 6) 语义护栏已固化
+    inv_ids = {i["id"] for i in INVARIANTS}
+    assert {"project-is-root", "contract-is-process",
+            "subcontract-parent-valid"} <= inv_ids, inv_ids
+    print("[OK] v5 核心：项目为聚合根 / 合同为过程凭证 / 分包合同自关系")
 
 
 def test_cost_rollup_model():
@@ -55,10 +91,15 @@ def test_spec_shape():
     assert {"F-project-cost-warning", "F-cost-rollup", "F-capital-occupation",
             "F-project-roi", "F-project-margin", "F-payment-cycle",
             "F-receivable-status"} <= fids
-    # Action 含 v4 最小集
+    # Action 含 v5 最小集（收付款条件已改为「关联项目已立」，新增签订分包合同）
     aids = {a["id"] for a in spec["actions"]}
     assert {"recordReceipt", "recordPayment", "confirmMilestoneValue",
-            "createMinorMilestone", "completeMilestone", "raiseProjectCostWarning"} <= aids
+            "createMinorMilestone", "completeMilestone", "raiseProjectCostWarning",
+            "createSubContract"} <= aids
+    # v5：收付款动作的前置是「项目已立」而非「合同已立」
+    acts = {a["id"]: a for a in spec["actions"]}
+    for aid in ("recordReceipt", "recordPayment"):
+        assert "关联项目已立" in acts[aid]["conditions"], acts[aid]["conditions"]
 
 
 def test_new_functions():
@@ -126,7 +167,8 @@ def test_receivable_lifecycle():
 
 if __name__ == "__main__":
     test_entities_v4()
-    test_links_v4()
+    test_links_v5()
+    test_project_is_root_v5()
     test_cost_rollup_model()
     test_spec_shape()
     test_new_functions()
