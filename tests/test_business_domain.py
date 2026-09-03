@@ -81,16 +81,19 @@ def test_registry():
     assert res["status"] == "预警", res
     assert abs(res["budget_ratio"] - 0.96) < 1e-6, res
     assert res["remaining_cost"] == 4.0, res
-    # Function/Action 声明齐全
-    for fid in ("F-project-margin", "F-payment-cycle", "F-project-cost-warning"):
+    # 6 个主场景 Function 声明齐全
+    for fid in ("F-project-margin", "F-payment-cycle", "F-project-cost-warning",
+                "F-capital-occupation", "F-project-roi", "F-cost-rollup"):
         assert functions.has(fid), fid
-    for aid in ("createProject", "linkContractToProject",
-                "assignPersonnelToProject", "raiseProjectCostWarning"):
+    # v4 最小 Action 集声明齐全
+    for aid in ("recordReceipt", "recordPayment", "confirmMilestoneValue",
+                "createMinorMilestone", "completeMilestone", "raiseProjectCostWarning"):
         assert actions.has(aid), aid
-    # 业务实体 / 关系声明存在
-    assert set(["Project", "Opportunity", "Contract", "Personnel", "Supplier"]).issubset(biz.CONCEPTS.keys())
+    # 业务实体 / 关系声明存在（v4：5 实体）
+    assert set(["Project", "Contract", "Milestone", "Receipt", "Payment"]).issubset(biz.CONCEPTS.keys())
     assert "Contract.belongsTo(Project)" in biz.RELATIONS
-    assert "Project.managedBy(Personnel)" in biz.RELATIONS
+    assert "Project.hasMilestone(Milestone)" in biz.RELATIONS
+    assert "Milestone.decomposedFrom(Milestone)" in biz.RELATIONS
     print("[OK] 注册表契约：Function + Action + 实体 + 关系 声明完整")
 
 
