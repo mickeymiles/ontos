@@ -321,11 +321,19 @@ def receivable_status(invoice_date: Optional[str] = None, due_date: Optional[str
     }
 
 
-def payment_cycle(sign_date: Optional[str] = None, receipts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Function F-payment-cycle 实现：回款周期 = 签约日 → 首笔回款日。
+def payment_cycle(sign_date: Optional[str] = None, receipts: Optional[List[Dict[str, Any]]] = None,
+                  basis: str = "last", recv_source: Optional[str] = None) -> Dict[str, Any]:
+    """Function F-payment-cycle 实现：回款周期 = 合同签订日 → 回款日。
 
-    输入：sign_date 签约日, receipts 回款单列表（取 received_date / due_date）。
-    输出：cycle_days(签约到首笔回款天数), sign_date, first_recv_date, due_date(首笔账期)。
+    ★ 口径对齐 9006 现网（project_metrics.payment_cycle）：
+      回款周期 = **最后一笔**回款日 − 合同签订日（basis='last'，默认）。
+      现网 ETL 亦为「最后一笔」；本函数额外支持 basis='first'（首笔回款速度）供分析。
+
+    输入：sign_date 合同签订日；receipts 回款单列表（取 received_date / due_date）；
+          basis ∈ {last, first}；recv_source 回款时间的来源标记（由 ABox 层传入，
+          仅作可追溯标记不参与计算：plm_milestone / finance_detail / maindata）。
+    输出：cycle_days, recv_date(实际采用), first/last_recv_date, recv_count, basis, recv_source。
+    缺数据：sign_date 或回款日缺失 → cycle_days=None（现网口径为 NaN + 说明）。
     纯函数、无 IO。
     """
     from datetime import datetime as _dt
@@ -338,20 +346,40 @@ def payment_cycle(sign_date: Optional[str] = None, receipts: Optional[List[Dict[
         except Exception:
             return None
 
+    if basis not in ("last", "first"):
+        basis = "last"
     sd = _parse(sign_date)
     recvs = receipts or []
-    recv_dates = [_parse(r.get("received_date")) for r in recvs]
-    recv_dates = [d for d in recv_dates if d]
-    first_recv = min(recv_dates) if recv_dates else None
-    due_dates = [_parse(r.get("due_date")) for r in recvs]
-    due_dates = [d for d in due_dates if d]
+    recv_dates = sorted(d for d in (_parse(r.get("received_date")) for r in recvs) if d)
+    if not recv_dates:
+        picked = None
+    elif basis == "first":
+        picked = recv_dates[0]
+    else:
+        picked = recv_dates[-1]
+    cycle_days = (picked - sd).days if (sd and picked) else None
+    due_dates = [d for d in (_parse(r.get("due_date")) for r in recvs) if d]
     due = min(due_dates) if due_dates else None
-    cycle_days = (first_recv - sd).days if (sd and first_recv) else None
+
+    note = ""
+    if sd is None:
+        note = "NaN：缺合同签订时间（sign_date）"
+    elif picked is None:
+        note = "NaN：无任何有效回款记录"
+    elif cycle_days is not None and cycle_days < 0:
+        note = "异常：回款日早于合同签订日，请核查 sign_date 与回款日期"
+
     return {
         "cycle_days": cycle_days,
         "sign_date": sign_date,
-        "first_recv_date": first_recv.isoformat() if first_recv else None,
+        "recv_date": picked.isoformat() if picked else None,
+        "first_recv_date": recv_dates[0].isoformat() if recv_dates else None,
+        "last_recv_date": recv_dates[-1].isoformat() if recv_dates else None,
         "due_date": due.isoformat() if due else None,
+        "recv_count": len(recv_dates),
+        "basis": basis,
+        "recv_source": recv_source,
+        "note": note,
     }
 
 
@@ -411,10 +439,15 @@ def project_roi(revenue: float = 0.0, current_cost: float = 0.0) -> Dict[str, An
 _FUNCTION_DEFS: List[Definition] = [
     Definition(
         id="F-payment-cycle", name="回款周期", kind="function", domain="financial",
-        description="合同签订到首笔回款的天数（基于 Receipt 回款日；账期=开票日+账期天数）。",
-        inputs=["sign_date", "receipts"],
-        outputs=["cycle_days", "sign_date", "first_recv_date", "due_date"],
-        invariant="cycle_days>=0", version="0.5", ontology_bound=True,
+        description="回款周期 = 回款日 − 合同签订日。basis='last'(★默认，对齐 9006 现网口径："
+                    "最后一笔回款) 或 'first'(首笔回款速度)。缺 sign_date 或无有效回款 → "
+                    "cycle_days=None（现网为 NaN + 说明）；回款日早于签约日标记异常。",
+        inputs=["sign_date", "receipts", "basis", "recv_source"],
+        outputs=["cycle_days", "recv_date", "first_recv_date", "last_recv_date",
+                 "recv_count", "due_date", "basis", "recv_source", "note"],
+        invariant="sign_date 与回款日均有效时 cycle_days=(recv_date-sign_date).days；"
+                  "回款日早于签约日须标记异常而非静默归零",
+        version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-receivable-status", name="应收/回款状态", kind="function", domain="financial",
