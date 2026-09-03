@@ -436,6 +436,100 @@ def project_roi(revenue: float = 0.0, current_cost: float = 0.0) -> Dict[str, An
     return {"roi": round((r - c) / c, 4), "revenue": r, "current_cost": c}
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 计算分发器：供 9006 / demo 共用，确保"算法只在 ontos 一份"
+# ═══════════════════════════════════════════════════════════════════════
+import inspect as _inspect
+
+
+def _norm_fn_key(name: str) -> str:
+    """归一化函数名：去掉前缀 F-、连字符转下划线（payment_cycle / F-payment-cycle 等价）。"""
+    s = str(name or "").strip()
+    if s.startswith("F-"):
+        s = s[2:]
+    return s.replace("-", "_")
+
+
+# 对外暴露的计算函数（纯函数、无 IO）。键同时支持 "payment_cycle" 与 "F-payment-cycle" 两种命名。
+_COMPUTE_FUNCS = {
+    "payment_cycle": payment_cycle,
+    "F-payment-cycle": payment_cycle,
+    "capital_occupation": capital_occupation,
+    "F-capital-occupation": capital_occupation,
+    "project_margin": project_margin,
+    "F-project-margin": project_margin,
+    "project_roi": project_roi,
+    "F-project-roi": project_roi,
+    "cost_rollup": cost_rollup,
+    "F-cost-rollup": cost_rollup,
+    "receivable_status": receivable_status,
+    "F-receivable-status": receivable_status,
+    "project_cost_warning": project_cost_warning,
+    "F-project-cost-warning": project_cost_warning,
+}
+_COMPUTE_FUNCS_NORM = {_norm_fn_key(k): v for k, v in _COMPUTE_FUNCS.items()}
+
+
+def list_compute_functions() -> list:
+    """列出所有可计算函数（含参数与说明），供 UI / agent 发现。"""
+    seen = set()
+    out = []
+    for fn in _COMPUTE_FUNCS_NORM.values():
+        if fn in seen:
+            continue
+        seen.add(fn)
+        sig = _inspect.signature(fn)
+        params = []
+        for pname, p in sig.parameters.items():
+            if pname == "return":
+                continue
+            params.append({
+                "name": pname,
+                "required": p.default is _inspect.Parameter.empty,
+                "default": None if p.default is _inspect.Parameter.empty else p.default,
+                "annotation": (str(p.annotation).replace("typing.", "")
+                               if p.annotation is not _inspect.Parameter.empty else "Any"),
+            })
+        out.append({
+            "id": fn.__name__,
+            "fid": "F-" + fn.__name__.replace("_", "-"),
+            "doc": (fn.__doc__ or "").strip().split("\n")[0],
+            "params": params,
+        })
+    return out
+
+
+def dispatch(function: str, params: dict = None) -> dict:
+    """统一计算分发：入参 = 函数名(或 F-xxx) + 参数字典，返回该函数计算结果。
+
+    - 函数名缺失/未知 → {'success': False, 'error': 'unknown_function', ...}
+    - 参数缺失/类型错误 → {'success': False, 'error': 'param_error', ...}（不抛 500）
+    - 成功 → {'success': True, 'function': <名>, 'result': <原函数返回值>}
+    """
+    if not function:
+        return {"success": False, "error": "missing_function",
+                "message": "未提供 function 名称"}
+    fn = _COMPUTE_FUNCS_NORM.get(_norm_fn_key(function))
+    if fn is None:
+        return {"success": False, "error": "unknown_function",
+                "message": f"未知计算函数：{function}",
+                "available": [f["id"] for f in list_compute_functions()]}
+    params = params or {}
+    if not isinstance(params, dict):
+        return {"success": False, "error": "param_error",
+                "message": "params 必须是对象/字典"}
+    try:
+        result = fn(**params)
+    except TypeError as e:
+        return {"success": False, "error": "param_error",
+                "message": f"参数不匹配：{e}",
+                "signature": str(_inspect.signature(fn))}
+    except Exception as e:  # 业务纯函数不应抛，但兜底
+        return {"success": False, "error": "compute_error",
+                "message": f"{type(e).__name__}: {e}"}
+    return {"success": True, "function": fn.__name__, "result": result}
+
+
 _FUNCTION_DEFS: List[Definition] = [
     Definition(
         id="F-payment-cycle", name="回款周期", kind="function", domain="financial",
