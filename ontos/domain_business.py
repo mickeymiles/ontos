@@ -82,18 +82,25 @@ ENTITIES: Dict[str, Entity] = {
     "Project": Entity(
         name="Project", cn="项目", kind="top",
         desc="项目（★交付执行聚合根：合同落地后的执行交付单元，支持自主/采购/分包三种模式）。"
-             "里程碑、产值、成本、交付成果围绕项目组织；财经(发票/回款/保证金/付款)不挂项目、统一归合同。",
+             "里程碑、产值、交付成果围绕项目组织；财经(发票/回款/保证金/付款)不挂项目、统一归合同。"
+             "★四算(概算/预算/核算/决算)亦不挂项目——宿主是合同下的 CostBaseline，项目只作分摊维度。",
         attributes=[
             Attribute("project_no", "string", True, True, "core_project.project_no", "项目编号"),
             Attribute("name", "string", True, False, "core_project.name", "项目名称"),
             Attribute("status", "enum", False, False, "core_project.status", "执行态：进行中/已完成/关闭"),
             Attribute("delivery_mode", "enum", False, False, "core_project.delivery_mode", "交付模式：自主实施/外购采购/分包"),
+            # ── 四算属性（★DEPRECATED-待迁移）：宿主应为 Contract 下的 CostBaseline ──
+            # 迁移时机：与成本预警切源同批。★此处保留属性本体，以维持 build_project_abox /
+            # F-project-cost-warning 不回归；待 9006 成本预警改读 CostBaseline 后方可移除。
             # 概算是项目的属性（展示口径），★不参与成本预警判定，故不是 F-project-cost-warning 的入参
-            Attribute("estimate", "number", False, False, "(主数据)=硬件预估成本+服务预估成本", "概算(预估成本)"),
-            Attribute("budget", "number", False, False, "plm_baseline.total_cost", "预算(概算/预算基线)"),
+            Attribute("estimate", "number", False, False, "(主数据)=硬件预估成本+服务预估成本",
+                      "概算(预估成本) ★DEPRECATED:权威源=CostBaseline(calc_type=概算)"),
+            Attribute("budget", "number", False, False, "plm_baseline.total_cost",
+                      "预算(概算/预算基线) ★DEPRECATED:权威源=CostBaseline(calc_type=基准预算)"),
             Attribute("current_cost", "number", False, False,
                       "(派生)=F-cost-rollup(ΣPayment+Σ成本明细行)",
-                      "当前成本(派生属性；★唯一权威来源=F-cost-rollup，禁止调用方自行拼装)"),
+                      "当前成本(派生属性；★唯一权威来源=F-cost-rollup，禁止调用方自行拼装)"
+                      " ★DEPRECATED:权威源=CostBaseline(calc_type=核算)"),
             Attribute("start_date", "date", False, False, "core_project.start_date", "开始日期"),
             Attribute("end_date", "date", False, False, "core_project.end_date", "结束日期"),
         ],
@@ -327,6 +334,40 @@ ENTITIES: Dict[str, Entity] = {
         ],
         relations=["hasDeposit_inv"],
     ),
+    # ── 四算主线：成本基线（★挂【合同】——财经根对象；四算=本实体的四次实例化 + 版本链）──
+    "CostBaseline": Entity(
+        name="CostBaseline", cn="成本基线", kind="child", parent="Contract",
+        desc="成本基线（★挂【合同】——财经根对象；四算=概算/基准预算/生产预算/核算/决算的统一承载）。"
+             "每一次「算」产出一条基线记录，靠 calc_type + version 区分；★变更/超支升级出新版本，禁止覆盖。"
+             "★产生地 ≠ 归集地：概算由商机产生、核算由项目产生，但归集锚一律是合同——"
+             "否则「决算毛利率 ≥ 签单毛利率」这一一号可度量目标无法计算。"
+             "注：ontos 的 kind 已被 top|child 占用，故四算类型字段命名为 calc_type。",
+        attributes=[
+            Attribute("baseline_no", "string", True, True, "cost_baseline.baseline_no", "基线编号(○待建表)"),
+            Attribute("calc_type", "enum", True, False, "cost_baseline.calc_type",
+                      "★四算类型：概算/基准预算/生产预算/核算/决算"),
+            Attribute("contract_no", "string", False, False, "cost_baseline.contract_no",
+                      "归集锚(合同号)；★概算期可空——此时合同尚未存在，Win 后回填（同 List 的双可空模式）"),
+            Attribute("producer_type", "enum", True, False, "cost_baseline.producer_type",
+                      "产生者类型：Opportunity/Contract/Project（★多态：产生地 ≠ 归集地）"),
+            Attribute("producer_no", "string", True, False, "cost_baseline.producer_no",
+                      "产生者编号（多态引用，与 producer_type 配对）"),
+            Attribute("version", "number", True, False, "cost_baseline.version",
+                      "同 calc_type 内递增；变更/预算升级出新版，旧版作废不覆盖"),
+            Attribute("contract_amount", "number", False, False, "cost_baseline.contract_amount", "该版口径下的合同额"),
+            Attribute("cost_breakdown", "string", False, False, "cost_baseline.cost_breakdown",
+                      "成本三分量(硬件/软件/服务)，与 COST_FORMULA_POLICY 对齐"),
+            Attribute("gross_profit", "number", False, False, "cost_baseline.gross_profit", "毛利"),
+            Attribute("gross_margin", "number", False, False, "cost_baseline.gross_margin", "毛利率(%)"),
+            Attribute("period", "string", False, False, "cost_baseline.period",
+                      "生产预算专用：按里程碑/时间段拆解（★生产预算=行，待 CostBaselineLine 落地）"),
+            Attribute("effective_from", "date", False, False, "cost_baseline.effective_from", "生效日"),
+            Attribute("status", "enum", False, False, "cost_baseline.status",
+                      "草稿/已锁定/已升级/已作废/已决算；★概算审批通过即锁定，不得擅自更改"),
+        ],
+        relations=["producesEstimate_inv", "producesBudget_inv", "producesAccounting_inv",
+                   "supersedesBaseline", "decomposesToMilestone"],
+    ),
 }
 
 
@@ -372,6 +413,21 @@ LINKS: List[Dict[str, str]] = [
      "desc": "★合同预警（凭证类：合同到期/未归档…由对应 Function 判定后写入）"},
     {"predicate": "hasWarning", "subj": "Opportunity", "obj": "Warning", "card": "1:N",
      "desc": "★商机预警（线索类：商机停滞…由对应 Function 判定后写入）"},
+    # ── 四算主线：成本基线（★产生地 ≠ 归集地；基线一律挂合同，项目只作分摊维度）──
+    {"predicate": "producesEstimate", "subj": "Opportunity", "obj": "CostBaseline", "card": "1:N",
+     "desc": "★商机(售前投标)产生【概算】：销售主导，审批通过后锁定、不得擅自更改；"
+             "概算期 contract_no 为空，Win 后回填（此时合同才存在）"},
+    {"predicate": "producesBudget", "subj": "Contract", "obj": "CostBaseline", "card": "1:N",
+     "desc": "★合同产生【基准预算】与【决算】：基准预算=合同级总量(头)，触发于合同签订前/变更时/超支升级时；"
+             "决算=完工或终止后由项目财经推进的终态基线"},
+    {"predicate": "producesAccounting", "subj": "Project", "obj": "CostBaseline", "card": "1:N",
+     "desc": "★项目产生【核算】：按「实际发生 + 未来预估」滚动计算，PM 确认成本归集、项目财经做盈亏分析与风险预警"},
+    {"predicate": "supersedesBaseline", "subj": "CostBaseline", "obj": "CostBaseline", "card": "1:0..1",
+     "desc": "★基线版本链（自关系）：合同变更 / 成本超支升级时出新版本，旧版置「已作废」★禁止覆盖，"
+             "以保留「签单时的承诺 vs 现在的承诺」的可追溯性"},
+    {"predicate": "decomposesToMilestone", "subj": "CostBaseline", "obj": "Milestone", "card": "1:N",
+     "desc": "★生产预算=行：基准预算拆解到各里程碑 + 各时间段；"
+             "⌛ 待 CostBaselineLine 实体落地（当前合同:项目=1:1，暂不需要分摊）"},
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -948,7 +1004,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-project-cost-warning", name="项目成本预警", kind="function", domain="project", category="预警", produces_for=['Project'],
+        id="F-project-cost-warning", name="项目成本预警", kind="function", domain="financial", category="预警", produces_for=['Project'],
         description="依据 预算 与 当前成本 计算预算完成比(budget_ratio=current_cost/budget)，"
                     "按本体声明阈值(COST_WARNING_POLICY)给出 正常/预警/超支 判定状态。"
                     "★阈值与规则语义由本体声明，调用方不得自行硬编码；需试算其他阈值时"
@@ -973,14 +1029,14 @@ _FUNCTION_DEFS: List[Definition] = [
               "composite": "F-project-cost-warning-from-ledger"},
     ),
     Definition(
-        id="F-cost-rollup", name="项目成本聚合", kind="function", domain="project", category="聚合", produces_for=['Project'],
+        id="F-cost-rollup", name="项目成本聚合", kind="function", domain="financial", category="聚合", produces_for=['Project'],
         description="项目当前成本 = Σ付款(Payment) + Σ成本明细行(ABox，人工/其他/预提)。",
         inputs=["payments", "cost_detail_rows"], outputs=["current_cost", "payment_sum", "costitem_sum"],
         invariant="current_cost = payment_sum + costitem_sum and all>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-project-cost-warning-from-ledger", name="项目成本预警(从台账)", kind="function",
-        domain="project", category="组合", produces_for=['Project'],
+        domain="financial", category="组合", produces_for=['Project'],
         description="组合函数：先经 F-cost-rollup 由付款/成本明细聚合出当前成本，"
                     "再交由 F-project-cost-warning 判定。★成本口径的唯一入口，"
                     "调用方不得自行拼装 current_cost（此前平台/PLM/本体三套口径并存）。",
@@ -1001,7 +1057,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-project-budget", name="项目预算", kind="function", domain="project", category="聚合", produces_for=['Project'],
+        id="F-project-budget", name="项目预算", kind="function", domain="financial", category="聚合", produces_for=['Project'],
         description="预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
         inputs=["hw_integration_fee", "service_est_cost", "sw_est_impl_fee"],
         outputs=["budget", "breakdown", "source_function"],
@@ -1009,7 +1065,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
     ),
     Definition(
-        id="F-project-cost", name="项目成本", kind="function", domain="project", category="聚合", produces_for=['Project'],
+        id="F-project-cost", name="项目成本", kind="function", domain="financial", category="聚合", produces_for=['Project'],
         description="成本 = 硬件集成费实际 + 软件实际实施费 + 往年服务直接/间接 + 当年服务直接/间接"
                     "（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
         inputs=["hw_integration_actual", "sw_impl_actual", "prior_svc_direct", "prior_svc_indirect",
@@ -1020,13 +1076,13 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
     ),
     Definition(
-        id="F-project-cost-remaining", name="滞后剩余成本", kind="function", domain="project", category="派生", produces_for=['Project'],
+        id="F-project-cost-remaining", name="滞后剩余成本", kind="function", domain="financial", category="派生", produces_for=['Project'],
         description="滞后剩余成本 = 预算 − 成本（主数据快照口径，未叠加工单预估）。",
         inputs=["budget", "cost"], outputs=["budget", "cost", "remaining_cost", "source_function"],
         invariant="remaining_cost = budget - cost (budget>0)", version="0.1", ontology_bound=True,
     ),
     Definition(
-        id="F-workorder-cost-rollup", name="工单预估成本汇总", kind="function", domain="project", category="聚合", produces_for=['Project'],
+        id="F-workorder-cost-rollup", name="工单预估成本汇总", kind="function", domain="financial", category="聚合", produces_for=['Project'],
         description="工单预估成本 = Σ工单(人员投入+差旅+灵活用工+变动费用)；用于补主数据滞后缺口。"
                     "初期人员成本由项目经理预估，后续可由 Task×Person 费率替换。",
         inputs=["workorders"], outputs=["wo_est_cost", "count", "source_function"],
@@ -1034,7 +1090,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.1", ontology_bound=True,
     ),
     Definition(
-        id="F-project-current-remaining", name="当前预估剩余成本", kind="function", domain="project", category="派生", produces_for=['Project'],
+        id="F-project-current-remaining", name="当前预估剩余成本", kind="function", domain="financial", category="派生", produces_for=['Project'],
         description="当前预估剩余成本 = 预算 − 成本 − 工单预估成本（叠加执行侧工单预估，反映更及时真实剩余）。",
         inputs=["budget", "cost", "wo_est_cost"],
         outputs=["budget", "cost", "wo_est_cost", "current_remaining_cost", "source_function"],
@@ -1120,6 +1176,35 @@ ACTIONS_PROJ = {
                  "缺有效预算不得写预警（require_budget）",
                  "warning_no 全局唯一",
                  "同主体+同类型+同状态 按周期去重"], "幂等": True, "分类": "预警闭环", "指向": ['Project', 'Warning'],
+    },
+    # ── 四算主线动作（★宿主=合同下的 CostBaseline）──────────────────────────
+    "LockBaseline": {
+        "定义": "锁定一条成本基线（★对应业务口径「概算审批通过后不得擅自更改」）。"
+                "概算由销售主导、在投标报价阶段产生，审批通过即置「已锁定」，此后任何改动须出新版本、禁止覆盖。",
+        "条件": [],  # ⌛校验器待 CostBaseline 的 ABox 构建器落地后补齐（与成本预警切源同批）
+        "效果": "更新 CostBaseline.status=已锁定；此后该版本只读。",
+        "不变量": ["已锁定基线不得直接修改（须经 supersedesBaseline 出新版本）",
+                 "同 calc_type 内 version 单调递增"], "幂等": True, "分类": "四算基线", "指向": ['CostBaseline'],
+    },
+    "UpgradeBudget": {
+        "定义": "★成本超支 → 预算升级：当成本预警判定为「超支」时，重编预算并出新版本"
+                "（对应业务「成本超支导致预算升级时」这一预算触发条件）。"
+                "★接在 raiseProjectCostWarning 之后，补齐「核算 → 预算」的反向闭环。",
+        "条件": ["成本预警状态 ∈ {预警, 超支}"],
+        "效果": "新增 CostBaseline(calc_type=基准预算, version=旧版+1)，旧版置「已升级」；"
+                "建立 supersedesBaseline(新版→旧版)。",
+        "不变量": ["旧版禁止覆盖，只可置「已升级」", "新版 version = 旧版 + 1",
+                 "升级须可追溯到触发它的预警事实"], "幂等": True, "分类": "四算基线", "指向": ['CostBaseline'],
+    },
+    "Finalize": {
+        "定义": "★决算：项目完工或终止后，由项目财经推进，产出全生命周期的终态基线并复盘。"
+                "可度量目标：决算毛利率 ≥ 签单毛利率。",
+        "条件": [],  # ⌛同上，待 CostBaseline ABox 构建器落地
+        "效果": "新增 CostBaseline(calc_type=决算, status=已决算)，"
+                "含全生命周期合同/回款/标准成本/财务成本/毛利。",
+        "不变量": ["决算为终态，不得再出新版本",
+                 "须可与概算基线比对（决算毛利率 vs 签单毛利率）"],
+        "幂等": True, "分类": "四算基线", "指向": ['Contract', 'CostBaseline'],
     },
 }
 
