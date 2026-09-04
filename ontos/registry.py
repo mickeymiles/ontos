@@ -24,6 +24,11 @@ class Definition:
     version: str = "0.1"
     ontology_bound: bool = True        # False = 通用旁路工具，不经 9010 / 不受 S1-S5
     employee_bound: bool = False       # Skill 是否绑定 Employee（Q10）
+    # ── 分类与关联（供目录页分组/过滤，非归属 owner）──
+    category: str = ""                # 类型：聚合/比率/周期/状态判定/资金占用/预警/派生/组合（函数）
+                                    #      或 财经入账/交付履约/结构变更/预警闭环（动作）
+    produces_for: list = field(default_factory=list)  # 函数产出的派生属性归属实体（多值）
+    targets: list = field(default_factory=list)       # 动作指向的实体（多值，Action-targets-Entity）
     meta: dict = field(default_factory=dict)
 
 

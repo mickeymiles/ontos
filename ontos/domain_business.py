@@ -914,7 +914,7 @@ def dispatch(function: str, params: dict = None) -> dict:
 
 _FUNCTION_DEFS: List[Definition] = [
     Definition(
-        id="F-payment-cycle", name="回款周期", kind="function", domain="financial",
+        id="F-payment-cycle", name="回款周期", kind="function", domain="financial", category="周期", produces_for=['Contract', 'Project'],
         description="回款周期 = 回款日 − 合同签订日。basis='last'(★默认，对齐 9006 现网口径："
                     "最后一笔回款) 或 'first'(首笔回款速度)。缺 sign_date 或无有效回款 → "
                     "cycle_days=None（现网为 NaN + 说明）；回款日早于签约日标记异常。",
@@ -926,21 +926,21 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-receivable-status", name="应收/回款状态", kind="function", domain="financial",
+        id="F-receivable-status", name="应收/回款状态", kind="function", domain="financial", category="状态判定", produces_for=['Receipt'],
         description="基于 开票日/到期日/应收金额/已回款 判定 待收/部分/已收/逾期，并给出账龄区间与逾期天数。",
         inputs=["invoice_date", "due_date", "amount", "received_amount", "received_date", "today"],
         outputs=["status", "remain", "overdue_days", "aging_days", "aging_bucket"],
         invariant="remain = amount - received_amount and remain>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-capital-occupation", name="资金占用", kind="function", domain="financial",
+        id="F-capital-occupation", name="资金占用", kind="function", domain="financial", category="资金占用", produces_for=['Contract', 'Project'],
         description="资金占用 = Σ已付(Payment.paid_amount) + Σ应收未收(Receipt.amount-received_amount)。",
         inputs=["payments", "receipts"],
         outputs=["occupied", "paid_total", "receivable_remain", "net"],
         invariant="occupied = paid_total + receivable_remain and all>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-project-margin", name="项目毛利率", kind="function", domain="financial",
+        id="F-project-margin", name="项目毛利率", kind="function", domain="financial", category="比率", produces_for=['Contract', 'Project'],
         description="项目/合同毛利率 = 签单毛利 / 合同额。",
         inputs=["sign_amount", "sign_gross_profit"],
         outputs=["gross_rate", "sign_amount", "sign_gross_profit"],
@@ -948,7 +948,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-project-cost-warning", name="项目成本预警", kind="function", domain="project",
+        id="F-project-cost-warning", name="项目成本预警", kind="function", domain="project", category="预警", produces_for=['Project'],
         description="依据 预算 与 当前成本 计算预算完成比(budget_ratio=current_cost/budget)，"
                     "按本体声明阈值(COST_WARNING_POLICY)给出 正常/预警/超支 判定状态。"
                     "★阈值与规则语义由本体声明，调用方不得自行硬编码；需试算其他阈值时"
@@ -973,14 +973,14 @@ _FUNCTION_DEFS: List[Definition] = [
               "composite": "F-project-cost-warning-from-ledger"},
     ),
     Definition(
-        id="F-cost-rollup", name="项目成本聚合", kind="function", domain="project",
+        id="F-cost-rollup", name="项目成本聚合", kind="function", domain="project", category="聚合", produces_for=['Project'],
         description="项目当前成本 = Σ付款(Payment) + Σ成本明细行(ABox，人工/其他/预提)。",
         inputs=["payments", "cost_detail_rows"], outputs=["current_cost", "payment_sum", "costitem_sum"],
         invariant="current_cost = payment_sum + costitem_sum and all>=0", version="0.5", ontology_bound=True,
     ),
     Definition(
         id="F-project-cost-warning-from-ledger", name="项目成本预警(从台账)", kind="function",
-        domain="project",
+        domain="project", category="组合", produces_for=['Project'],
         description="组合函数：先经 F-cost-rollup 由付款/成本明细聚合出当前成本，"
                     "再交由 F-project-cost-warning 判定。★成本口径的唯一入口，"
                     "调用方不得自行拼装 current_cost（此前平台/PLM/本体三套口径并存）。",
@@ -994,14 +994,14 @@ _FUNCTION_DEFS: List[Definition] = [
               "policy": COST_WARNING_POLICY},
     ),
     Definition(
-        id="F-project-roi", name="项目ROI", kind="function", domain="financial",
+        id="F-project-roi", name="项目ROI", kind="function", domain="financial", category="比率", produces_for=['Project'],
         description="项目 ROI = (收益 - 当前成本) / 当前成本；收益取回款总额或合同额。",
         inputs=["revenue", "current_cost"], outputs=["roi", "revenue", "current_cost"],
         invariant="current_cost>0 implies roi=(revenue-current_cost)/current_cost",
         version="0.5", ontology_bound=True,
     ),
     Definition(
-        id="F-project-budget", name="项目预算", kind="function", domain="project",
+        id="F-project-budget", name="项目预算", kind="function", domain="project", category="聚合", produces_for=['Project'],
         description="预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
         inputs=["hw_integration_fee", "service_est_cost", "sw_est_impl_fee"],
         outputs=["budget", "breakdown", "source_function"],
@@ -1009,7 +1009,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
     ),
     Definition(
-        id="F-project-cost", name="项目成本", kind="function", domain="project",
+        id="F-project-cost", name="项目成本", kind="function", domain="project", category="聚合", produces_for=['Project'],
         description="成本 = 硬件集成费实际 + 软件实际实施费 + 往年服务直接/间接 + 当年服务直接/间接"
                     "（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
         inputs=["hw_integration_actual", "sw_impl_actual", "prior_svc_direct", "prior_svc_indirect",
@@ -1020,13 +1020,13 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
     ),
     Definition(
-        id="F-project-cost-remaining", name="滞后剩余成本", kind="function", domain="project",
+        id="F-project-cost-remaining", name="滞后剩余成本", kind="function", domain="project", category="派生", produces_for=['Project'],
         description="滞后剩余成本 = 预算 − 成本（主数据快照口径，未叠加工单预估）。",
         inputs=["budget", "cost"], outputs=["budget", "cost", "remaining_cost", "source_function"],
         invariant="remaining_cost = budget - cost (budget>0)", version="0.1", ontology_bound=True,
     ),
     Definition(
-        id="F-workorder-cost-rollup", name="工单预估成本汇总", kind="function", domain="project",
+        id="F-workorder-cost-rollup", name="工单预估成本汇总", kind="function", domain="project", category="聚合", produces_for=['Project'],
         description="工单预估成本 = Σ工单(人员投入+差旅+灵活用工+变动费用)；用于补主数据滞后缺口。"
                     "初期人员成本由项目经理预估，后续可由 Task×Person 费率替换。",
         inputs=["workorders"], outputs=["wo_est_cost", "count", "source_function"],
@@ -1034,7 +1034,7 @@ _FUNCTION_DEFS: List[Definition] = [
         version="0.1", ontology_bound=True,
     ),
     Definition(
-        id="F-project-current-remaining", name="当前预估剩余成本", kind="function", domain="project",
+        id="F-project-current-remaining", name="当前预估剩余成本", kind="function", domain="project", category="派生", produces_for=['Project'],
         description="当前预估剩余成本 = 预算 − 成本 − 工单预估成本（叠加执行侧工单预估，反映更及时真实剩余）。",
         inputs=["budget", "cost", "wo_est_cost"],
         outputs=["budget", "cost", "wo_est_cost", "current_remaining_cost", "source_function"],
@@ -1071,40 +1071,40 @@ ACTIONS_PROJ = {
         "条件": ["关联合同已立", "对应发票已开具（invoice-before-receipt）"],
         "效果": "新增 Receipt（挂合同；含 source_project_no/source_invoice_no/发票/账期/received_amount），"
                 "建立 hasReceipt(Contract→Receipt)。",
-        "不变量": ["receipt_no 全局唯一", "amount>=0", "received_amount<=amount", "invoiced=已开票 方可回款"], "幂等": True,
+        "不变量": ["receipt_no 全局唯一", "amount>=0", "received_amount<=amount", "invoiced=已开票 方可回款"], "幂等": True, "分类": "财经入账", "指向": ['Contract', 'Receipt'],
     },
     "recordPayment": {
         "定义": "记录一笔付款（我方→供应商/分包，流出；含开票/账期/已付；source_po ⌛待采购域）。★挂【合同】（财经根对象）。",
         "条件": ["关联合同已立"],
         "效果": "新增 Payment（挂合同；含 source_project_no/发票/账期/paid_amount），建立 hasPayment(Contract→Payment)。",
-        "不变量": ["payment_no 全局唯一", "amount>=0", "paid_amount<=amount"], "幂等": True,
+        "不变量": ["payment_no 全局唯一", "amount>=0", "paid_amount<=amount"], "幂等": True, "分类": "财经入账", "指向": ['Contract', 'Payment'],
     },
     "createSubContract": {
         "定义": "在主合同下签订分包合同（过程凭证：记录分包契约与归档信息；不直接产生收付款）。",
         "条件": ["主合同已立"],
         "效果": "新增 Contract(type=分包合同, parent_contract_no=主合同号)，建立 hasSubContract(主→分包)。",
         "不变量": ["contract_no 全局唯一", "parent_contract_no 必须指向已存在的合同",
-                 "不得自引用（合同不能是自己的父合同）", "分包合同仍须 belongsTo 某项目"], "幂等": True,
+                 "不得自引用（合同不能是自己的父合同）", "分包合同仍须 belongsTo 某项目"], "幂等": True, "分类": "结构变更", "指向": ['Contract'],
     },
     "confirmMilestoneValue": {
         "定义": "里程碑达成（初验）后报产值（OutputValue），建立 hasOutputValue(Milestone→OutputValue) 关系。",
         "条件": ["里程碑已立", "验收结论已填（acceptance）", "产值 value>=0"],
         "效果": "新增 OutputValue（挂项目·经里程碑；含 value/report_date/type/status）；"
                 "建立 hasOutputValue(Milestone→OutputValue)。★产值≠开票，仅业务进度计量。",
-        "不变量": ["value>=0", "未确认产值不得触发开票申请"], "幂等": True,
+        "不变量": ["value>=0", "未确认产值不得触发开票申请"], "幂等": True, "分类": "交付履约", "指向": ['Milestone', 'OutputValue'],
     },
     "applyInvoice": {
         "定义": "由项目产值达标触发开票申请，落地为合同发票（Invoice）。★产值(项目)与发票(合同)是「触发」非「归属」关系。",
         "条件": ["关联合同已立", "存在已确认产值(OutputValue.status=已确认)", "开票金额>0"],
         "效果": "新增 Invoice（挂合同；含 amount/invoice_date/source_project_no），建立 hasInvoice(Contract→Invoice)；"
                 "回款经 recordReceipt 统一归合同后再按 source_project_no 分摊。",
-        "不变量": ["invoice_no 全局唯一", "amount>0", "发票本体归属合同、不挂项目", "同一产值仅可触发一次开票申请"], "幂等": True,
+        "不变量": ["invoice_no 全局唯一", "amount>0", "发票本体归属合同、不挂项目", "同一产值仅可触发一次开票申请"], "幂等": True, "分类": "财经入账", "指向": ['Contract', 'Invoice'],
     },
     "completeMilestone": {
         "定义": "标记里程碑完成（含实际日期/验收结论）。",
         "条件": ["里程碑已立"],
         "效果": "更新 Milestone.status=已完成 + actual_date + acceptance。",
-        "不变量": ["actual_date 不早于 plan_date(软约束，可标注延期)"], "幂等": True,
+        "不变量": ["actual_date 不早于 plan_date(软约束，可标注延期)"], "幂等": True, "分类": "交付履约", "指向": ['Milestone'],
     },
     "raiseProjectCostWarning": {
         "定义": "当成本预警判定状态为 预警/超支 时，写一条 Warning 事实"
@@ -1119,7 +1119,7 @@ ACTIONS_PROJ = {
                  "severity 与 status 固定映射（预警→预警，超支→严重）",
                  "缺有效预算不得写预警（require_budget）",
                  "warning_no 全局唯一",
-                 "同主体+同类型+同状态 按周期去重"], "幂等": True,
+                 "同主体+同类型+同状态 按周期去重"], "幂等": True, "分类": "预警闭环", "指向": ['Project', 'Warning'],
     },
 }
 
@@ -1215,7 +1215,8 @@ def to_spec() -> Dict[str, Any]:
         "functions": [functions.get(fid).__dict__ for fid in functions.ids()],
         "actions": [
             {"id": aid, "name": aid, "definition": s["定义"], "conditions": s["条件"],
-             "effects": s["效果"], "invariants": s["不变量"], "idempotent": s["幂等"]}
+             "effects": s["效果"], "invariants": s["不变量"], "idempotent": s["幂等"],
+             "category": s.get("分类", ""), "targets": s.get("指向", [])}
             for aid, s in ACTIONS_PROJ.items()
         ],
         "invariants": INVARIANTS,
@@ -1254,6 +1255,7 @@ def _register() -> None:
     for aid, spec in ACTIONS_PROJ.items():
         actions.register(Definition(
             id=aid, name=aid, kind="action", domain="project",
+            category=spec.get("分类", ""), targets=list(spec.get("指向", [])),
             description=spec.get("定义", ""),
             inputs=list(spec.get("条件", [])),
             invariant="; ".join(spec.get("不变量", [])) or None,
