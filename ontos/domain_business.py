@@ -345,7 +345,7 @@ ENTITIES: Dict[str, Entity] = {
         attributes=[
             Attribute("baseline_no", "string", True, True, "cost_baseline.baseline_no", "基线编号(○待建表)"),
             Attribute("calc_type", "enum", True, False, "cost_baseline.calc_type",
-                      "★四算类型：概算/基准预算/生产预算/核算/决算"),
+                      "★四算类型：概算/基准预算/生产预算/核算/决算（候选值见模块常量 COST_BASELINE_CALC_TYPES）"),
             Attribute("contract_no", "string", False, False, "cost_baseline.contract_no",
                       "归集锚(合同号)；★概算期可空——此时合同尚未存在，Win 后回填（同 List 的双可空模式）"),
             Attribute("producer_type", "enum", True, False, "cost_baseline.producer_type",
@@ -369,6 +369,18 @@ ENTITIES: Dict[str, Entity] = {
                    "supersedesBaseline", "decomposesToMilestone"],
     ),
 }
+
+# ── 四算类型枚举（CostBaseline.calc_type 的机器可读候选；9006 四算功能读本体取此）──
+COST_BASELINE_CALC_TYPES = ("概算", "基准预算", "生产预算", "核算", "决算")
+COST_BASELINE_CALC_TYPE_CN = {
+    "概算": "概算（售前/立项，顶层管控基线）",
+    "基准预算": "基准预算（合同级总量，可因变更/超支升级出 v2）",
+    "生产预算": "生产预算（拆到里程碑+时间段，行级，待 CostBaselineLine 落地）",
+    "核算": "核算（实际发生+未来预估，滚动 v1…vN）",
+    "决算": "决算（关闭时终态，决算毛利率对标签单毛利率）",
+}
+# 哪些阶段参与成本/毛利计算（9006 本期全部参与；核算/决算虽有实际数但口径按业务逐步放开）
+COST_BASELINE_CALCULATED = ("概算", "基准预算", "生产预算", "核算", "决算")
 
 
 # 关系（Link）：主体.谓词(客体) [基数] 说明
