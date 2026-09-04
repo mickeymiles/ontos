@@ -70,6 +70,7 @@ class Attribute:
 class Entity:
     name: str
     kind: str                                   # top(顶层) | child(子实体)
+    cn: str = ""                                # 中文名（★拓扑/页面显示用；name 为稳定英文键，勿改）
     parent: Optional[str] = None                # child 的父实体
     desc: str = ""
     attributes: List[Attribute] = field(default_factory=list)
@@ -79,7 +80,7 @@ class Entity:
 # 实体定义（含结构化属性 + 来源字段映射）
 ENTITIES: Dict[str, Entity] = {
     "Project": Entity(
-        name="Project", kind="top",
+        name="Project", cn="项目", kind="top",
         desc="项目（★交付执行聚合根：合同落地后的执行交付单元，支持自主/采购/分包三种模式）。"
              "里程碑、产值、成本、交付成果围绕项目组织；财经(发票/回款/保证金/付款)不挂项目、统一归合同。",
         attributes=[
@@ -99,7 +100,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["belongsTo_inv", "hasMilestone", "hasOrder", "hasWarning"],
     ),
     "Contract": Entity(
-        name="Contract", kind="top",
+        name="Contract", cn="合同", kind="top",
         desc="合同（★财经根对象 / 契约凭证）。发票/回款/保证金/付款全部挂合同（只管钱、不管交付进度）；"
              "同时是交付源头（一份合同拆分为多个交付项目）。记录「签了什么、跟谁签、纸面在哪」。",
         attributes=[
@@ -124,7 +125,7 @@ ENTITIES: Dict[str, Entity] = {
                    "hasReceipt", "hasPayment", "hasInvoice", "hasDeposit", "fromPreSales_inv"],
     ),
     "Milestone": Entity(
-        name="Milestone", kind="child", parent="Project",
+        name="Milestone", cn="里程碑", kind="child", parent="Project",
         desc="里程碑（★挂【项目】——交付节点，产值计量的依据，供 PMO 跟踪，与回款周期关联）。"
              "按合同付款节奏确定；★子里程碑已移除，本实体仅项目级里程碑。",
         attributes=[
@@ -138,7 +139,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasMilestone_inv", "hasOutputValue"],
     ),
     "Receipt": Entity(
-        name="Receipt", kind="child", parent="Contract",
+        name="Receipt", cn="回款", kind="child", parent="Contract",
         desc="回款单（★挂【合同】——财经根对象的资金流入；实际到账资金，与合同应收对账；"
              "可分期、可逾期。由项目产值触发的开票申请落地为发票后，回款统一归合同）",
         attributes=[
@@ -158,7 +159,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasReceipt_inv"],
     ),
     "Payment": Entity(
-        name="Payment", kind="child", parent="Contract",
+        name="Payment", cn="付款", kind="child", parent="Contract",
         desc="付款/应付单（★挂【合同】——财经根对象的资金流出；我方→供应商/分包，收票→账期→付款；"
              "可分期、可逾期；source_po ⌛待采购域）",
         attributes=[
@@ -178,7 +179,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasPayment_inv"],
     ),
     "Warning": Entity(
-        name="Warning", kind="child", parent=None,
+        name="Warning", cn="预警", kind="child", parent=None,
         desc="预警（★跨场景通用事实载体：商机/合同/项目执行各类预警的统一收口）。"
              "由 Function 判定产出，具备独立编号与处理生命周期，可单独分派与闭环；"
              "经 subject_type+subject_no 与 hasWarning 关系指回主体（多态，故 parent=None）。",
@@ -201,7 +202,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasWarning_inv"],
     ),
     "Order": Entity(
-        name="Order", kind="child", parent="Project",
+        name="Order", cn="订单", kind="child", parent="Project",
         desc="订单（项目交付执行单元：项目的交付过程分解为订单，聚焦交付落地；"
              "与里程碑为项目下并行的「交付进度(PMO)」与「执行落地」两个视角）。",
         attributes=[
@@ -215,7 +216,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasOrder_inv", "hasWorkOrder"],
     ),
     "WorkOrder": Entity(
-        name="WorkOrder", kind="child", parent="Order",
+        name="WorkOrder", cn="工单", kind="child", parent="Order",
         desc="工单（订单的细化分解；明确工单内容 + 预估成本四分项。初期人员成本由项目经理预估，"
              "后续由 Task×Person 费率替换）。",
         attributes=[
@@ -230,7 +231,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasWorkOrder_inv", "hasTask"],
     ),
     "Task": Entity(
-        name="Task", kind="child", parent="WorkOrder",
+        name="Task", cn="任务", kind="child", parent="WorkOrder",
         desc="任务（工单的分解，由人员执行；人员有费率可估算滞后成本）。"
              "★本期仅建实体、不参与成本计算（后续替换工单预估人员成本）。",
         attributes=[
@@ -243,7 +244,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasTask_inv", "assignedTo"],
     ),
     "Person": Entity(
-        name="Person", kind="top",
+        name="Person", cn="人员", kind="top",
         desc="人员（资源/费率主数据；任务由其执行，费率用于后续估算滞后成本）。参考实体，parent=None。",
         attributes=[
             Attribute("person_no", "string", True, True, "person.person_no", "人员编号"),
@@ -255,7 +256,7 @@ ENTITIES: Dict[str, Entity] = {
     ),
     # ── LTC 主实体：商机 / 售前(投标)（顶层，独立实体，非附件）──────────────────
     "Opportunity": Entity(
-        name="Opportunity", kind="top",
+        name="Opportunity", cn="商机", kind="top",
         desc="商机（销售机会，线索转化而来；立项评估、预估收益）。一条商机可发起多轮投标。",
         attributes=[
             Attribute("opp_no", "string", True, True, "opportunity.opp_no", "商机编号"),
@@ -269,7 +270,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasPreSales"],
     ),
     "PreSales": Entity(
-        name="PreSales", kind="top",
+        name="PreSales", cn="售前", kind="top",
         desc="售前(投标)（★独立实体，非商机附件；商机中标前的投标应答阶段）。"
              "支持同一商机多次投标版本管理；中标后生成一份合同。",
         attributes=[
@@ -288,7 +289,7 @@ ENTITIES: Dict[str, Entity] = {
     ),
     # ── 交付链附属：产值(OutputValue，挂项目·经里程碑) ────────────────────────
     "OutputValue": Entity(
-        name="OutputValue", kind="child", parent="Milestone",
+        name="OutputValue", cn="产值", kind="child", parent="Milestone",
         desc="产值记录（★挂【项目·经里程碑】——阶段性完工计量值；产值≠开票金额，"
              "产值是业务进度，开票是财经动作。一个里程碑可多次产值调整）。",
         attributes=[
@@ -302,7 +303,7 @@ ENTITIES: Dict[str, Entity] = {
     ),
     # ── 财经链附属：发票 / 保证金（挂合同） ─────────────────────────────────
     "Invoice": Entity(
-        name="Invoice", kind="child", parent="Contract",
+        name="Invoice", cn="发票", kind="child", parent="Contract",
         desc="发票（★挂【合同】——财经根对象；可由项目产值触发开票申请，但发票本体归属合同）。",
         attributes=[
             Attribute("invoice_no", "string", True, True, "finance_detail.invoice_no", "发票号"),
@@ -315,7 +316,7 @@ ENTITIES: Dict[str, Entity] = {
         relations=["hasInvoice_inv"],
     ),
     "Deposit": Entity(
-        name="Deposit", kind="child", parent="Contract",
+        name="Deposit", cn="保证金", kind="child", parent="Contract",
         desc="保证金（★挂【合同】——财经根对象；投标保证金可前置关联售前，履约保证金归属合同）。",
         attributes=[
             Attribute("deposit_no", "string", True, True, "finance_detail.deposit_no", "保证金编号"),
@@ -1229,7 +1230,7 @@ def to_spec() -> Dict[str, Any]:
         },
         "entities": [
             {
-                "name": e.name, "kind": e.kind, "parent": e.parent, "desc": e.desc,
+                "name": e.name, "cn": e.cn, "kind": e.kind, "parent": e.parent, "desc": e.desc,
                 "attributes": [
                     {"name": a.name, "type": a.type, "required": a.required,
                      "unique": a.unique, "source": a.source, "desc": a.desc}

@@ -233,6 +233,23 @@ def test_cost_formula_functions():
     print("[OK] 成本双口径 Function：预算/成本/滞后剩余/工单预估/当前预估剩余 全部通过")
 
 
+def test_entities_cn_names():
+    # 全部 15 个实体必须有中文名（拓扑/页面显示，name 为稳定英文键）
+    expected = {"Project": "项目", "Contract": "合同", "Milestone": "里程碑",
+                "Receipt": "回款", "Payment": "付款", "Warning": "预警",
+                "Order": "订单", "WorkOrder": "工单", "Task": "任务", "Person": "人员",
+                "Opportunity": "商机", "PreSales": "售前", "OutputValue": "产值",
+                "Invoice": "发票", "Deposit": "保证金"}
+    for name, e in ENTITIES.items():
+        assert e.cn, f"{name} 缺中文名"
+        assert e.cn == expected.get(name), f"{name} 中文名应为 {expected.get(name)}，实得 {e.cn}"
+    # to_spec 必须带 cn
+    spec = to_spec()
+    for ent in spec["entities"]:
+        assert "cn" in ent and ent["cn"], ent
+    print("[OK] 全部 15 实体均含正确中文名（cn）且 to_spec 导出")
+
+
 if __name__ == "__main__":
     test_entities_v6()
     test_links_v5()
@@ -242,4 +259,5 @@ if __name__ == "__main__":
     test_new_functions()
     test_receivable_lifecycle()
     test_cost_formula_functions()
+    test_entities_cn_names()
     print("ALL TBOX TESTS PASSED")
