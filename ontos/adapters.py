@@ -20,18 +20,19 @@ def cost_warning_all_from_records(records: List[Dict[str, Any]]) -> Dict[str, An
     """对一批项目记录批量计算成本预警（局部落地样例）。
 
     每条 record 建议字段：project_no, contract_no, name, estimate, budget, current_cost。
+    ★estimate(概算) 仅原样透传用于展示，不参与预警判定（v5.1 已移出 F-project-cost-warning 入参）。
     返回与 9006 cost_warning_all 同构的 summary + rows，便于页面/智能体直接消费。
     """
     details: List[Dict[str, Any]] = []
     total_budget = total_current = 0.0
     status_count: Dict[str, int] = {"正常": 0, "预警": 0, "超支": 0}
     for r in records:
-        if r.get("estimate") is None and r.get("budget") is None \
-                and float(r.get("current_cost") or 0) <= 0:
+        # 只有具备预算或已发生成本才可判定。
+        # ★概算 estimate 仅为展示属性、不参与预警判定（v5.1：已移出 F-project-cost-warning 入参）
+        if r.get("budget") is None and float(r.get("current_cost") or 0) <= 0:
             continue
         res = functions.call(
             "F-project-cost-warning",
-            estimate=r.get("estimate"),
             budget=r.get("budget"),
             current_cost=r.get("current_cost"),
         )
@@ -44,7 +45,7 @@ def cost_warning_all_from_records(records: List[Dict[str, Any]]) -> Dict[str, An
             "project_no": r.get("project_no"),
             "contract_no": r.get("contract_no"),
             "name": r.get("name") or "",
-            "estimate": res.get("estimate"),
+            "estimate": r.get("estimate"),   # 展示用，原样透传（非判定入参）
             "budget": res.get("budget"),
             "current_cost": res.get("current_cost"),
             "remaining_cost": res.get("remaining_cost"),

@@ -77,7 +77,7 @@ def test_shadow_vs_legacy():
 def test_registry():
     # pilot Function 已注册且可经注册表调用
     assert functions.has("F-project-cost-warning")
-    res = functions.call("F-project-cost-warning", estimate=90, budget=100, current_cost=96)
+    res = functions.call("F-project-cost-warning", budget=100, current_cost=96)
     assert res["status"] == "预警", res
     assert abs(res["budget_ratio"] - 0.96) < 1e-6, res
     assert res["remaining_cost"] == 4.0, res
@@ -112,6 +112,39 @@ def test_adapters_landing():
     assert out["status_count"]["超支"] == 1, out["status_count"]
     assert out["status_count"]["正常"] == 1, out["status_count"]
     print("[OK] adapters 局部落地样例：批量预警汇总正确（1预警/1超支/2正常）")
+
+
+# ── 5) 组合函数：成本聚合 → 成本预警（★成本口径唯一入口）────────────
+def test_cost_warning_from_ledger():
+    from ontos.domain_business import project_cost_warning_from_ledger
+
+    # 付款 60+20 + 成本明细 20 = 当前成本 100，预算 100 → 完成比 1.0 → 预警（非超支）
+    res = project_cost_warning_from_ledger(
+        budget=100.0,
+        payments=[{"amount": 60.0}, {"amount": 20.0}],
+        cost_detail_rows=[{"amount": 20.0}],
+    )
+    assert res["current_cost"] == 100.0, res
+    assert res["budget_ratio"] == 1.0, res
+    assert res["status"] == "预警", res            # ratio=1.0 不 > overrun_ratio=1.0
+    assert res["severity"] == "预警", res
+    assert res["cost_breakdown"]["payment_sum"] == 80.0, res
+    assert res["cost_breakdown"]["costitem_sum"] == 20.0, res
+
+    # 付款 130 > 预算 100 → 超支（严重）
+    res2 = project_cost_warning_from_ledger(budget=100.0, payments=[{"amount": 130.0}])
+    assert res2["status"] == "超支" and res2["severity"] == "严重", res2
+
+    # 缺预算不得误报
+    res3 = project_cost_warning_from_ledger(budget=None, payments=[{"amount": 130.0}])
+    assert res3["status"] == "正常", res3
+
+    # 注册表双通道可用（functions.call / dispatch）
+    assert functions.has("F-project-cost-warning-from-ledger")
+    r = functions.call("F-project-cost-warning-from-ledger",
+                       budget=100.0, payments=[{"amount": 95.0}])
+    assert r["status"] == "预警" and r["current_cost"] == 95.0, r
+    print("[OK] 组合函数：聚合→判定 链路正确（含 registry 调用）")
 
 
 if __name__ == "__main__":

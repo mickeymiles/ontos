@@ -14,9 +14,9 @@ from ontos.registry import functions
 
 
 def test_entities_v4():
-    # v4：仅 5 实体，无顶层/子实体混淆
+    # v5.1：5 个业务实体 + Warning（★跨场景通用预警载体，替代原孤儿 CostWarning）
     names = set(ENTITIES.keys())
-    assert names == {"Contract", "Project", "Milestone", "Receipt", "Payment"}, names
+    assert names == {"Contract", "Project", "Milestone", "Receipt", "Payment", "Warning"}, names
     # 每个实体都有属性，且至少含唯一主键
     for name, e in ENTITIES.items():
         assert e.attributes, f"{name} 无属性"
@@ -27,7 +27,7 @@ def test_links_v5():
     preds = {l["predicate"] for l in LINKS}
     for need in ["belongsTo", "hasMilestone", "decomposedFrom",
                  "realizesReceivable", "sourceMilestone", "hasReceipt",
-                 "hasPayment", "signedWith", "hasSubContract"]:
+                 "hasPayment", "signedWith", "hasSubContract", "hasWarning"]:
         assert need in preds, f"缺关系 {need}"
 
 
@@ -82,7 +82,13 @@ def test_cost_rollup_model():
 def test_spec_shape():
     spec = to_spec()
     assert "entities" in spec and "links" in spec
-    assert len(spec["entities"]) == 5
+    assert len(spec["entities"]) == 6          # v5.1：新增 Warning 实体
+    # ★阈值策略与枚举由本体声明并导出（平台/智能体读取，不得自行硬编码）
+    assert spec["policies"]["costWarning"]["warn_ratio"] == 0.9
+    assert spec["policies"]["costWarning"]["overrun_ratio"] == 1.0
+    assert spec["policies"]["costWarning"]["require_budget"] is True
+    assert set(spec["enums"]["costWarningStatus"]) == {"正常", "预警", "超支"}
+    assert spec["enums"]["statusToSeverity"] == {"预警": "预警", "超支": "严重"}
     # 兼容 9006 /spec 历史字段
     assert set(spec["concepts"].keys()) == set(ENTITIES.keys())
     assert len(spec["relations"]) == len(LINKS)

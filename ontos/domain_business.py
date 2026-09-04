@@ -77,12 +77,16 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("project_no", "string", True, True, "core_project.project_no", "项目编号"),
             Attribute("name", "string", True, False, "core_project.name", "项目名称"),
             Attribute("status", "enum", False, False, "core_project.status", "执行态：进行中/已完成/关闭"),
+            # 概算是项目的属性（展示口径），★不参与成本预警判定，故不是 F-project-cost-warning 的入参
+            Attribute("estimate", "number", False, False, "(主数据)=硬件预估成本+服务预估成本", "概算(预估成本)"),
             Attribute("budget", "number", False, False, "plm_baseline.total_cost", "预算(概算/预算基线)"),
-            Attribute("current_cost", "number", False, False, "(派生)=ΣPayment+Σ成本明细行(ABox)", "当前成本(派生属性)"),
+            Attribute("current_cost", "number", False, False,
+                      "(派生)=F-cost-rollup(ΣPayment+Σ成本明细行)",
+                      "当前成本(派生属性；★唯一权威来源=F-cost-rollup，禁止调用方自行拼装)"),
             Attribute("start_date", "date", False, False, "core_project.start_date", "开始日期"),
             Attribute("end_date", "date", False, False, "core_project.end_date", "结束日期"),
         ],
-        relations=["belongsTo_inv", "hasMilestone", "hasReceipt", "hasPayment"],
+        relations=["belongsTo_inv", "hasMilestone", "hasReceipt", "hasPayment", "hasWarning"],
     ),
     "Contract": Entity(
         name="Contract", kind="top",
@@ -104,7 +108,7 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("archived", "enum", False, False, "contract.archived", "是否归档：未归档/已归档(○待建列)"),
             Attribute("storage_location", "string", False, False, "contract.storage_location", "存放位置(○待建列)"),
         ],
-        relations=["belongsTo", "hasSubContract", "signedWith"],
+        relations=["belongsTo", "hasSubContract", "signedWith", "hasWarning"],
     ),
     "Milestone": Entity(
         name="Milestone", kind="child", parent="Project",
@@ -161,6 +165,29 @@ ENTITIES: Dict[str, Entity] = {
         ],
         relations=["hasPayment_inv", "sourceProcurement_out"],
     ),
+    "Warning": Entity(
+        name="Warning", kind="child", parent=None,
+        desc="预警（★跨场景通用事实载体：商机/合同/项目执行各类预警的统一收口）。"
+             "由 Function 判定产出，具备独立编号与处理生命周期，可单独分派与闭环；"
+             "经 subject_type+subject_no 与 hasWarning 关系指回主体（多态，故 parent=None）。",
+        attributes=[
+            Attribute("warning_no", "string", True, True, "", "预警编号（全局唯一·○待建列）"),
+            Attribute("warning_type", "enum", True, False, "", "预警类型：成本超支/回款逾期/进度延期/合同到期/商机停滞"),
+            Attribute("severity", "enum", True, False, "", "严重度：提醒/预警/严重"),
+            Attribute("status", "enum", False, False, "", "处理生命周期：待处理/已确认/已处理/已关闭"),
+            Attribute("subject_type", "string", True, False, "", "主体实体类型：Project/Contract/Opportunity"),
+            Attribute("subject_no", "string", True, False, "", "主体编号（项目号/合同号/商机号）"),
+            Attribute("metric_name", "string", False, False, "", "触发指标名（如 budget_ratio 预算完成比）"),
+            Attribute("metric_value", "number", False, False, "", "触发时指标实际值"),
+            Attribute("threshold", "number", False, False, "", "触发阈值（取本体声明策略值）"),
+            Attribute("message", "string", False, False, "", "预警描述（可解释文案，供页面/智能体直接呈现）"),
+            Attribute("source_function", "string", False, False, "", "产出本预警的 Function id（可追溯）"),
+            Attribute("raised_at", "date", False, False, "", "产生时间"),
+            Attribute("owner", "string", False, False, "", "处理责任人(○待定)"),
+            Attribute("resolved_at", "date", False, False, "", "关闭时间(○待定)"),
+        ],
+        relations=["hasWarning_inv"],
+    ),
 }
 
 
@@ -184,6 +211,10 @@ LINKS: List[Dict[str, str]] = [
      "desc": "★项目付款（我方→供应商/分包，流出）——收付款挂项目(执行态)而非合同(凭证)"},
     {"predicate": "signedWith", "subj": "Contract", "obj": "Supplier", "card": "N:2",
      "desc": "合同签约方（甲方客户/乙方我方或供应商；⌛ Supplier 范围外，仅占位）"},
+    {"predicate": "hasWarning", "subj": "Project", "obj": "Warning", "card": "1:N",
+     "desc": "★项目预警（执行态类：成本超支/回款逾期/进度延期…由 Function 判定后写入）"},
+    {"predicate": "hasWarning", "subj": "Contract", "obj": "Warning", "card": "1:N",
+     "desc": "★合同预警（凭证类：合同到期/未归档…由对应 Function 判定后写入）"},
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -207,15 +238,39 @@ RELATIONS = {f"{l['subj']}.{l['predicate']}({l['obj']})": l["desc"] for l in LIN
 # ═══════════════════════════════════════════════════════════════════════
 # Function：动力层·计算/判定（只读，不改事实）
 # ═══════════════════════════════════════════════════════════════════════
-COST_WARNING_RATIO = 0.9  # 预算完成比阈值：≥90% 触发预警（对齐 9006 COST_WARNING_RATIO）
+# ── 成本预警·本体声明（★单一真相：阈值与规则语义在此显式声明，平台/智能体一律读取，
+#    不得各自硬编码。修改阈值只需改本块，无需改任何实现代码）──────────────────
+COST_WARNING_POLICY: Dict[str, Any] = {
+    "metric": "budget_ratio",       # 判定指标：预算完成比 = 当前成本 / 预算
+    "warn_ratio": 0.9,              # 预算完成比 ≥ 90%  → 判定「预警」
+    "overrun_ratio": 1.0,           # 预算完成比 > 100% → 判定「超支」（严重）
+    "require_budget": True,         # 缺有效预算(budget<=0/None)不得判定预警/超支 → 防误报
+    "source_function": "F-project-cost-warning",
+}
+COST_WARNING_RATIO = COST_WARNING_POLICY["warn_ratio"]   # 兼容旧引用；新代码请用 POLICY
+COST_WARNING_OVERRUN_RATIO = COST_WARNING_POLICY["overrun_ratio"]
+# 判定状态枚举（Function 输出值，非实体）
+COST_WARNING_STATUS: Tuple[str, ...] = ("正常", "预警", "超支")
+# 预警严重度 / 处理生命周期 / 预警类型 枚举（Warning 实体属性取值域）
+WARNING_SEVERITY: Tuple[str, ...] = ("提醒", "预警", "严重")
+WARNING_LIFECYCLE: Tuple[str, ...] = ("待处理", "已确认", "已处理", "已关闭")
+WARNING_TYPES: Tuple[str, ...] = ("成本超支", "回款逾期", "进度延期", "合同到期", "商机停滞")
+# 判定状态 → 预警严重度 固定映射（仅非“正常”才产生 Warning 事实）
+STATUS_TO_SEVERITY: Dict[str, str] = {"预警": "预警", "超支": "严重"}
+# 范围外类型（⌛ 待对应场景接入）：合同到期 / 商机停滞 / 回款逾期 / 进度延期 仅有类型占位
 
 
 def cost_warning_rule(budget: Optional[float], current_cost: Optional[float],
-                      threshold: float = COST_WARNING_RATIO) -> Tuple[str, str]:
+                      threshold: float = COST_WARNING_POLICY["warn_ratio"],
+                      overrun_ratio: float = COST_WARNING_POLICY["overrun_ratio"]
+                      ) -> Tuple[str, str]:
     """项目成本预警·纯语义规则（与 9006 _cost_status 逐字等价，已影子比对）。
 
+    阈值缺省取本体声明 COST_WARNING_POLICY（★单一真相），调用方亦可显式覆盖
+    （用于模拟/假设分析：如试算「80% 提醒 + 100% 严重」的两级口径）。
+
     入参：budget 预算（None/<=0 视为缺预算）；current_cost 当前成本（缺失按 0）。
-    返回：(status, note)；status ∈ {正常, 预警, 超支}
+    返回：(status, note)；status ∈ COST_WARNING_STATUS = {正常, 预警, 超支}
     """
     b = budget if budget is not None else None
     c = current_cost if current_cost is not None else 0.0
@@ -224,7 +279,7 @@ def cost_warning_rule(budget: Optional[float], current_cost: Optional[float],
             return '正常', '缺预算，暂无法判定预警（当前成本 ¥%s）' % format(round(c), ',')
         return '正常', '缺预算且无当前成本，无法比较'
     ratio = c / b if b > 0 else None
-    if ratio is not None and c > b:
+    if ratio is not None and ratio > overrun_ratio:
         return '超支', '当前成本 ¥%s 已超过预算（超支 ¥%s）' % (
             format(round(c), ','), format(round(c - b), ','))
     if ratio is not None and ratio >= threshold:
@@ -232,20 +287,64 @@ def cost_warning_rule(budget: Optional[float], current_cost: Optional[float],
     return '正常', '预算执行在阈值内（预算完成比 %d%%）' % (round(ratio * 100) if ratio is not None else 0)
 
 
-def project_cost_warning(estimate: Optional[float] = None, budget: Optional[float] = None,
-                         current_cost: Optional[float] = None) -> Dict[str, Any]:
+def project_cost_warning(budget: Optional[float] = None,
+                         current_cost: Optional[float] = None,
+                         warn_ratio: Optional[float] = None,
+                         overrun_ratio: Optional[float] = None) -> Dict[str, Any]:
     """Function F-project-cost-warning 实现：在 cost_warning_rule 之上补齐
-    预算完成比 / 剩余成本，返回结构化结果。纯函数、无 IO。"""
+    预算完成比 / 剩余成本 / 严重度，返回结构化结果。纯函数、无 IO。
+
+    阈值缺省取本体声明 COST_WARNING_POLICY（★单一真相）；显式传入则用于假设分析
+    （如试算 80%/100% 两级口径），不改动本体声明本身。
+
+    ★入参约定：
+    - 概算 estimate **不是本函数入参**——概算只是 Project 的展示属性，不参与预警判定
+      （v5.1 清理：此前 est 被接收后原样返回，是幽灵参数）。
+    - current_cost 的权威来源是 F-cost-rollup；需从付款/成本明细现算时，
+      请直接调用组合函数 project_cost_warning_from_ledger，勿自行拼装。
+    """
     c = float(current_cost) if current_cost is not None else 0.0
     b = float(budget) if budget is not None else None
-    est = float(estimate) if estimate is not None else None
-    status, note = cost_warning_rule(b, c)
+    w = float(warn_ratio) if warn_ratio is not None else COST_WARNING_POLICY["warn_ratio"]
+    o = float(overrun_ratio) if overrun_ratio is not None else COST_WARNING_POLICY["overrun_ratio"]
+    status, note = cost_warning_rule(b, c, threshold=w, overrun_ratio=o)
     ratio = round(c / b, 4) if (b is not None and b > 0) else None
     remaining = round(b - c, 2) if (b is not None and c is not None) else None
     return {
-        'status': status, 'note': note, 'estimate': est, 'budget': b,
+        'status': status, 'note': note, 'budget': b,
         'current_cost': c, 'budget_ratio': ratio, 'remaining_cost': remaining,
+        # ── 供 raiseProjectCostWarning 写 Warning 实体（预警事实）所需字段 ──
+        'severity': STATUS_TO_SEVERITY.get(status),      # 正常 → None（不产生预警事实）
+        'threshold': w, 'overrun_ratio': o,
+        'metric_name': COST_WARNING_POLICY["metric"],
+        'source_function': COST_WARNING_POLICY["source_function"],
+        'policy': dict(COST_WARNING_POLICY),             # 回显本体声明，便于审计/页面标注
     }
+
+
+def project_cost_warning_from_ledger(budget: Optional[float] = None,
+                                     payments: Optional[List[Dict[str, Any]]] = None,
+                                     cost_detail_rows: Optional[List[Dict[str, Any]]] = None,
+                                     warn_ratio: Optional[float] = None,
+                                     overrun_ratio: Optional[float] = None) -> Dict[str, Any]:
+    """组合函数 F-project-cost-warning-from-ledger：成本聚合 → 成本预警判定，一步出结果。
+
+    ★本体声明「F-project-cost-warning.depends_on = F-cost-rollup」的可执行落地：
+    本函数强制 current_cost 由 F-cost-rollup 产出（Σ付款 + Σ成本明细行），
+    杜绝调用方各自拼装导致的「当前成本」口径漂移
+    （此前平台用 Σ已付款、PLM 用四算 actual_cum、本体说 Σ付款+明细，三套并存）。
+
+    纯函数、无 IO。返回 F-project-cost-warning 全量字段 + cost_breakdown 成本构成明细。
+    """
+    roll = cost_rollup(payments or [], cost_detail_rows or [])
+    res = project_cost_warning(budget=budget, current_cost=roll["current_cost"],
+                               warn_ratio=warn_ratio, overrun_ratio=overrun_ratio)
+    res["cost_breakdown"] = {
+        "payment_sum": roll["payment_sum"],
+        "costitem_sum": roll["costitem_sum"],
+        "source_function": "F-cost-rollup",
+    }
+    return res
 
 
 def cost_rollup(payments: List[Dict[str, Any]], cost_detail_rows: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -466,6 +565,8 @@ _COMPUTE_FUNCS = {
     "F-receivable-status": receivable_status,
     "project_cost_warning": project_cost_warning,
     "F-project-cost-warning": project_cost_warning,
+    "project_cost_warning_from_ledger": project_cost_warning_from_ledger,
+    "F-project-cost-warning-from-ledger": project_cost_warning_from_ledger,
 }
 _COMPUTE_FUNCS_NORM = {_norm_fn_key(k): v for k, v in _COMPUTE_FUNCS.items()}
 
@@ -567,16 +668,47 @@ _FUNCTION_DEFS: List[Definition] = [
     ),
     Definition(
         id="F-project-cost-warning", name="项目成本预警", kind="function", domain="project",
-        description="依据 预算 与 当前成本 计算预算执行比，给出 正常/预警/超支 状态。",
-        inputs=["estimate", "budget", "current_cost"],
-        outputs=["status", "note", "budget_ratio", "remaining_cost"],
-        invariant="budget>=0 and current_cost>=0", version="0.5", ontology_bound=True,
+        description="依据 预算 与 当前成本 计算预算完成比(budget_ratio=current_cost/budget)，"
+                    "按本体声明阈值(COST_WARNING_POLICY)给出 正常/预警/超支 判定状态。"
+                    "★阈值与规则语义由本体声明，调用方不得自行硬编码；需试算其他阈值时"
+                    "用 warn_ratio/overrun_ratio 入参覆盖，不改本体声明。",
+        inputs=["budget", "current_cost", "warn_ratio", "overrun_ratio"],
+        outputs=["status", "severity", "note", "budget_ratio", "remaining_cost",
+                 "threshold", "overrun_ratio", "metric_name", "source_function", "policy"],
+        # ★不变量按「有无有效预算」分述，避免 self-contradiction
+        invariant="current_cost>=0; "
+                  "budget 缺失或非正时 status=正常（require_budget，防误报）; "
+                  "budget>0 时：budget_ratio=current_cost/budget，"
+                  "status=超支 iff budget_ratio>overrun_ratio，"
+                  "status=预警 iff warn_ratio<=budget_ratio<=overrun_ratio",
+        version="0.7", ontology_bound=True,
+        meta={"policy": COST_WARNING_POLICY, "status_enum": COST_WARNING_STATUS,
+              "severity_map": STATUS_TO_SEVERITY,
+              # ★声明依赖：current_cost 的权威来源，禁止调用方自行拼装
+              "depends_on": ["F-cost-rollup"],
+              "current_cost_source": "F-cost-rollup",
+              "composite": "F-project-cost-warning-from-ledger"},
     ),
     Definition(
         id="F-cost-rollup", name="项目成本聚合", kind="function", domain="project",
         description="项目当前成本 = Σ付款(Payment) + Σ成本明细行(ABox，人工/其他/预提)。",
         inputs=["payments", "cost_detail_rows"], outputs=["current_cost", "payment_sum", "costitem_sum"],
         invariant="current_cost = payment_sum + costitem_sum and all>=0", version="0.5", ontology_bound=True,
+    ),
+    Definition(
+        id="F-project-cost-warning-from-ledger", name="项目成本预警(从台账)", kind="function",
+        domain="project",
+        description="组合函数：先经 F-cost-rollup 由付款/成本明细聚合出当前成本，"
+                    "再交由 F-project-cost-warning 判定。★成本口径的唯一入口，"
+                    "调用方不得自行拼装 current_cost（此前平台/PLM/本体三套口径并存）。",
+        inputs=["budget", "payments", "cost_detail_rows", "warn_ratio", "overrun_ratio"],
+        outputs=["status", "severity", "note", "budget_ratio", "remaining_cost",
+                 "threshold", "metric_name", "source_function", "policy", "cost_breakdown"],
+        invariant="current_cost = F-cost-rollup(payments, cost_detail_rows).current_cost; "
+                  "判定语义与 F-project-cost-warning 完全一致（同一阈值策略）",
+        version="0.7", ontology_bound=True,
+        meta={"composes": ["F-cost-rollup", "F-project-cost-warning"],
+              "policy": COST_WARNING_POLICY},
     ),
     Definition(
         id="F-project-roi", name="项目ROI", kind="function", domain="financial",
@@ -594,6 +726,7 @@ _FUNCTION_IMPLS = {
     "F-capital-occupation": capital_occupation,
     "F-project-margin": project_margin,
     "F-project-cost-warning": project_cost_warning,
+    "F-project-cost-warning-from-ledger": project_cost_warning_from_ledger,
     "F-cost-rollup": cost_rollup,
     "F-project-roi": project_roi,
 }
@@ -642,10 +775,19 @@ ACTIONS_PROJ = {
         "不变量": ["actual_date 不早于 plan_date(软约束，可标注延期)"], "幂等": True,
     },
     "raiseProjectCostWarning": {
-        "定义": "当成本预警状态为 预警/超支 时，写一条 CostWarning 事实。",
+        "定义": "当成本预警判定状态为 预警/超支 时，写一条 Warning 事实"
+                "（warning_type=成本超支，subject=项目）。★判定由 F-project-cost-warning 产出，"
+                "本动作只负责把判定结果落成可跟踪、可闭环的预警事实。",
         "条件": ["项目已立", "成本预警状态 ∈ {预警, 超支}"],
-        "效果": "新增 CostWarning(project, status, ratio, ts)；可触发通知。",
-        "不变量": ["仅在状态非 正常 时写预警", "同状态按周期去重"], "幂等": True,
+        "效果": "新增 Warning(warning_type=成本超支, severity=预警|严重, subject_type=Project, "
+                "subject_no=项目号, metric_name=budget_ratio, metric_value=预算完成比, "
+                "threshold=本体声明阈值, message=判定文案, "
+                "source_function=F-project-cost-warning)；建立 hasWarning(Project→Warning)。",
+        "不变量": ["仅在判定状态非 正常 时写预警",
+                 "severity 与 status 固定映射（预警→预警，超支→严重）",
+                 "缺有效预算不得写预警（require_budget）",
+                 "warning_no 全局唯一",
+                 "同主体+同类型+同状态 按周期去重"], "幂等": True,
     },
 }
 
@@ -678,12 +820,16 @@ INVARIANTS = [
 def build_project_abox(project: Dict[str, Any]) -> Dict[str, Any]:
     """将项目记录(dict)转换为语义事实表(ABox)，供校验器使用。纯函数。"""
     meta = project.get("meta") or {}
+    # 成本预警判定状态：由本体函数现算（★不可由调用方伪造），供 Action 前置校验
+    _st, _note = cost_warning_rule(project.get("budget"), project.get("current_cost"))
     return {
         "project_no": project.get("project_no"),
         "status": project.get("status") or "active",
         "contract_no": project.get("contract_no") or meta.get("contract_no"),
         "budget": project.get("budget"),
         "current_cost": project.get("current_cost"),
+        "cost_status": _st,
+        "cost_note": _note,
         "warning_raised": bool(meta.get("warning_raised")),
     }
 
@@ -707,6 +853,8 @@ def validate_project_action(action_id: str, abox: Dict[str, Any]) -> Tuple[bool,
         "里程碑已立(且 level=major)": has_proj,
         "里程碑已立": has_proj,
         "父大里程碑(Milestone.level=major)已立": has_proj,
+        # ★判定状态由本体函数现算，调用方无法伪造（修复此前条件串不匹配导致的护栏空转）
+        "成本预警状态 ∈ {预警, 超支}": abox.get("cost_status") in ("预警", "超支"),
         "项目已立且成本预警状态 ∈ {预警, 超支}": abox.get("warning_raised") or False,
     }
     for c in spec.get("条件", []):
@@ -736,6 +884,15 @@ def to_spec() -> Dict[str, Any]:
             for aid, s in ACTIONS_PROJ.items()
         ],
         "invariants": INVARIANTS,
+        # ── 本体声明的阈值策略与枚举（★单一真相：平台/智能体一律读取，不得自行硬编码）──
+        "policies": {"costWarning": COST_WARNING_POLICY},
+        "enums": {
+            "costWarningStatus": COST_WARNING_STATUS,
+            "warningSeverity": WARNING_SEVERITY,
+            "warningLifecycle": WARNING_LIFECYCLE,
+            "warningTypes": WARNING_TYPES,
+            "statusToSeverity": STATUS_TO_SEVERITY,
+        },
         "entities": [
             {
                 "name": e.name, "kind": e.kind, "parent": e.parent, "desc": e.desc,
