@@ -26,9 +26,9 @@ GOLDEN = [
     (100.0, 95.0,  "预警", "预算完成比已达 95%"),
     (200.0, 180.0, "预警", "预算完成比已达 90%"),     # 边界含 0.9
     (100.0, 120.0, "超支", "已超过预算"),
-    (None,  0.0,   "正常", "缺预算且无当前成本"),
-    (None,  30.0,  "正常", "缺预算，暂无法判定预警（当前成本 ¥30）"),
-    (0.0,   10.0,  "正常", "缺预算，暂无法判定预警（当前成本 ¥10）"),
+    (None,  0.0,   "正常", "缺预算且无有效成本"),
+    (None,  30.0,  "正常", "缺预算，暂无法判定预警（有效成本 ¥30）"),
+    (0.0,   10.0,  "正常", "缺预算，暂无法判定预警（有效成本 ¥10）"),
     (100.0, 0.0,   "正常", "预算执行在阈值内（预算完成比 0%）"),
 ]
 
@@ -68,9 +68,12 @@ def test_shadow_vs_legacy():
     for budget, current in cases:
         got_s, got_n = cost_warning_rule(budget, current)
         exp_s, exp_n = legacy(budget, current)
-        assert got_s == exp_s and got_n == exp_n, \
+        # v6 起 ontos 用语义更准确的「有效成本」(=当前成本+工单预估) 替代「当前成本」，
+        # 判定状态(status)必须逐字一致；note 仅在术语差异处归一化后比对。
+        got_n_norm = got_n.replace("有效成本", "当前成本")
+        assert got_s == exp_s and got_n_norm == exp_n, \
             f"不一致 ({budget},{current}): ontos=({got_s},{got_n!r}) 9006=({exp_s},{exp_n!r})"
-    print(f"[OK] 影子比对 {len(cases)} 例：ontos 与 9006 现算法逐字一致")
+    print(f"[OK] 影子比对 {len(cases)} 例：ontos 与 9006 判定状态逐字一致（note 术语已归一化）")
 
 
 # ── 3) 注册表契约验证 ───────────────────────────────────────
@@ -85,16 +88,29 @@ def test_registry():
     for fid in ("F-project-margin", "F-payment-cycle", "F-project-cost-warning",
                 "F-capital-occupation", "F-project-roi", "F-cost-rollup"):
         assert functions.has(fid), fid
-    # v4 最小 Action 集声明齐全
-    for aid in ("recordReceipt", "recordPayment", "confirmMilestoneValue",
-                "createMinorMilestone", "completeMilestone", "raiseProjectCostWarning"):
+    # v6.1 Action 集声明齐全（含新增 applyInvoice / createSubContract）
+    for aid in ("recordReceipt", "recordPayment", "confirmMilestoneValue", "applyInvoice",
+                "completeMilestone", "raiseProjectCostWarning", "createSubContract"):
         assert actions.has(aid), aid
-    # 业务实体 / 关系声明存在（v4：5 实体）
-    assert set(["Project", "Contract", "Milestone", "Receipt", "Payment"]).issubset(biz.CONCEPTS.keys())
+    # 业务实体 / 关系声明存在（v6.1：15 实体）
+    assert set(["Project", "Contract", "Milestone", "Receipt", "Payment", "Opportunity",
+                "PreSales", "OutputValue", "Invoice", "Deposit"]).issubset(biz.CONCEPTS.keys())
     assert "Contract.belongsTo(Project)" in biz.RELATIONS
     assert "Project.hasMilestone(Milestone)" in biz.RELATIONS
-    assert "Milestone.decomposedFrom(Milestone)" in biz.RELATIONS
-    print("[OK] 注册表契约：Function + Action + 实体 + 关系 声明完整")
+    # v6：子里程碑已移除 → decomposedFrom 不再存在；v6.1：里程碑不再 sourcedFromContract / executesAs
+    assert "Milestone.decomposedFrom(Milestone)" not in biz.RELATIONS
+    assert "Contract.sourcedFromContract(Milestone)" not in biz.RELATIONS
+    assert "Milestone.executesAs(Order)" not in biz.RELATIONS
+    # LTC 链路 + 执行链 + 财经链 关系存在
+    assert "Opportunity.hasPreSales(PreSales)" in biz.RELATIONS
+    assert "PreSales.winContract(Contract)" in biz.RELATIONS
+    assert "Milestone.hasOutputValue(OutputValue)" in biz.RELATIONS
+    assert "Contract.hasReceipt(Receipt)" in biz.RELATIONS
+    assert "Contract.hasInvoice(Invoice)" in biz.RELATIONS
+    assert "Contract.hasDeposit(Deposit)" in biz.RELATIONS
+    assert "Order.hasWorkOrder(WorkOrder)" in biz.RELATIONS
+    assert "Task.assignedTo(Person)" in biz.RELATIONS
+    print("[OK] 注册表契约：Function + Action + 实体 + 关系 声明完整（LTC 链路已固化）")
 
 
 # ── 4) adapters 局部落地样例 ───────────────────────────────
@@ -147,9 +163,39 @@ def test_cost_warning_from_ledger():
     print("[OK] 组合函数：聚合→判定 链路正确（含 registry 调用）")
 
 
+# ── 6) v6 成本双口径 + 预警切口径(wo_est_cost) ────────────────
+def test_cost_formula_and_warning_woest():
+    # 新成本函数注册齐全
+    for fid in ("F-project-budget", "F-project-cost", "F-project-cost-remaining",
+                "F-workorder-cost-rollup", "F-project-current-remaining"):
+        assert functions.has(fid), fid
+    # 预算/成本/工单/当前剩余 端到端
+    b = functions.call("F-project-budget", hw_integration_fee=100.0,
+                      service_est_cost=50.0, sw_est_impl_fee=30.0)
+    c = functions.call("F-project-cost", hw_integration_actual=80.0, sw_impl_actual=40.0,
+                      prior_svc_direct=10.0, prior_svc_indirect=5.0,
+                      curr_svc_direct=8.0, curr_svc_indirect=7.0)
+    wo = functions.call("F-workorder-cost-rollup", workorders=[
+        {"est_personnel": 20.0, "est_travel": 5.0, "est_flexible": 3.0, "est_variable": 2.0}])
+    cur = functions.call("F-project-current-remaining", budget=b["budget"], cost=c["cost"],
+                        wo_est_cost=wo["wo_est_cost"])
+    assert b["budget"] == 180.0 and c["cost"] == 150.0, (b, c)
+    assert wo["wo_est_cost"] == 30.0 and cur["current_remaining_cost"] == 0.0, (wo, cur)
+    # 预警切口径：wo_est_cost 叠加有效成本，剩余 = 预算-当前-工单，向后兼容(缺省0=滞后)
+    # w1: 缺省 wo_est_cost=0 (滞后口径)，当前成本 80/100=0.8 < 0.9 → 正常
+    w1 = functions.call("F-project-cost-warning", budget=100.0, current_cost=80.0)
+    assert w1["remaining_cost"] == 20.0 and w1["status"] == "正常", w1
+    w2 = functions.call("F-project-cost-warning", budget=100.0, current_cost=90.0, wo_est_cost=15.0)
+    assert w2["effective_cost"] == 105.0 and w2["status"] == "超支", w2
+    assert w2["remaining_cost"] == -5.0 and w2["wo_est_cost"] == 15.0, w2
+    print("[OK] v6 成本双口径 + 预警切口径(wo_est_cost) 全部通过")
+
+
 if __name__ == "__main__":
     test_golden()
     test_shadow_vs_legacy()
     test_registry()
     test_adapters_landing()
+    test_cost_warning_from_ledger()
+    test_cost_formula_and_warning_woest()
     print("\nALL PASS ✅")

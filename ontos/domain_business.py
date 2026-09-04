@@ -5,31 +5,40 @@
 单一真相源：实体 / 属性 / 关系 / Function / Action 的声明都写在这里（纯 Python，
 不落库；运行期只读导出，见 to_spec()）。ABox（真实数据行）在 9006 的 SQLite。
 
-═══ v5 核心修正（2026-09-03 用户纠正概念误区）═══
-**项目才是核心（聚合根），合同仅仅是一个"过程"——它是契约凭证，不是经营载体。**
+═══ 核心铁则（LTC · 2026-09-04 用户拍板，★硬性绑定约束）═══
+主业务时序链路：**商机 → 售前(投标) → 合同 → 项目(交付：自主/采购/分包)**。
 
-- 合同 Contract = **过程/契约凭证**：记录"合同文本、签订时间、是否归档、存放位置"等
-  凭证属性。它不承载经营执行，只回答"我们跟谁签了什么、纸面约定是什么、东西在哪"。
-- 项目 Project = **合同的执行态 / 经营聚合根**：收款、付款、里程碑、成本全部围绕项目
-  组织（而非围绕合同）。项目回答"这笔生意执行得怎么样、钱收没收回来、成本超没超"。
-- 因此 v4 中"收款/付款挂在合同下"是错的，v5 改为 **收款/付款挂项目**；
-  **合同只关联项目**（belongsTo），不直接挂收付款。
-- 一个合同可以有 **分包合同**（Contract 自关系 hasSubContract，1:N）。
+- 里程碑、产值 → 归属【项目】实体，不和合同直接绑定（项目是交付进度的聚合根）。
+- 财经类（发票、回款/收款、保证金、付款）→ 归属【合同】实体，不和项目直接绑定
+  （**合同是所有财经动作的根对象**，只管钱、不管交付进度）；多项目对应同一合同时，
+  回款统一对账到合同，再在项目间做成本/资金分摊。
+- 投标方案、标书、应答文件、评标资料 → 归属【售前(投标)】实体（独立实体，非商机的附件）。
+- 合同 Contract = **财经根对象 / 契约凭证**：发票/回款/保证金/付款全部挂合同；
+  同时是交付的源头（一份合同拆分为多个交付项目）。
+- 项目 Project = **交付执行聚合根**：里程碑、产值、成本、交付成果围绕项目组织，
+  回答"交付得怎么样、成本超没超"。
 
 ═══ 场景收敛（与用户拍板）═══
-当前只覆盖 **5 个财务/经营分析场景**，只构建它们直接需要的本体：
+当前覆盖 **5 个财务/经营分析场景**：
   回款周期 / 资金占用 / 项目毛利率 / 项目成本预警 / 项目 ROI。
-其余（商机/报价单/采购流程/人员/供应商主数据/成本明细实体）列入范围外（⌛），后续补充。
 
-关键定义决议：
-- 实体（5）：项目 Project(**核心·聚合根**) / 合同 Contract(过程·契约凭证) / 里程碑 Milestone
-            / 收款单 Receipt / 付款单 Payment。
-  * 里程碑大/小均挂项目；小里程碑通过 decomposedFrom 关联大里程碑（是大里程碑的细化分解）。
-  * 收款/付款是经营对象实体（非流水集合）：里程碑确认产值 → 开票 → 账期 → 回款/付款（可分期、可逾期）。
-  * 收款/付款 **挂项目**（执行态），不挂合同（凭证）。
-- 成本 = Project 的**派生度量属性**（非实体）：current_cost = ΣPayment + Σ成本明细行(ABox)。
-  成本明细行保留在数据层做下钻，不在 TBox 升格为实体（待"需独立处理成本项"场景再升格）。
-- 范围外关系 / 实体仅占位，不进主 LINKS/ENTITIES 渲染（见 OUT_OF_SCOPE_* 注释）。
+关键定义决议（v6.1 · 2026-09-04 LTC 修正）：
+- 实体（15）：4 主实体 商机/Opportunity、售前(投标)/PreSales、合同/Contract、项目/Project；
+  交付链：Milestone(项目交付节点·产值计量) → OutputValue(产值记录)
+    → Order(交付执行) → WorkOrder(工单·预估成本) → Task(任务·人执行) → Person(人员·费率)；
+  财经链（挂合同）：Receipt(回款) / Payment(付款) / Invoice(发票) / Deposit(保证金)；
+  预警事实：Warning(跨场景通用)。
+  * ★子里程碑(sub-milestone)已移除：里程碑仅项目级（按付款节奏确定产值），
+    执行拆解由 Order→WorkOrder→Task 承担。
+  * 里程碑/产值 **挂项目**；发票/回款/保证金/付款 **挂合同**（财经根对象）。
+  * 产值(项目) **触发** 开票申请（动作），开票结果落地【合同】——产值与发票是「触发」非「归属」关系。
+  * 收款/付款是经营对象实体：里程碑确认产值 → 触发开票 → 账期 → 回款/付款（可分期、可逾期）。
+- 成本双口径（详见 COST_FORMULA_POLICY，★单一真相）：
+  * 滞后口径（主数据，lag≈1月）：预算 = 硬件集成费+服务预估成本+软件预估实施费；
+    成本 = 硬件集成费实际+软件实际实施费+往年/当年服务直接/间接；剩余 = 预算−成本。
+  * 当前预估口径（补滞后）：当前预估剩余 = 预算−成本−工单预估成本
+    （Task×Person 费率后续替换工单预估人员成本）。
+- 范围外实体仅占位，不进主 LINKS/ENTITIES 渲染（见 OUT_OF_SCOPE_* 注释）。
 
 设计原则（v1.2 总纲）：
 - TBox 机器可读、可喂 LLM；Function 只读判定，Action 写回受约束 + 不变量 + 审计。
@@ -71,12 +80,13 @@ class Entity:
 ENTITIES: Dict[str, Entity] = {
     "Project": Entity(
         name="Project", kind="top",
-        desc="项目（★核心·聚合根：合同的执行态）。收款/付款/里程碑/成本全部围绕项目组织；"
-             "回答「这笔生意执行得怎么样、钱收回来没有、成本超没超」。",
+        desc="项目（★交付执行聚合根：合同落地后的执行交付单元，支持自主/采购/分包三种模式）。"
+             "里程碑、产值、成本、交付成果围绕项目组织；财经(发票/回款/保证金/付款)不挂项目、统一归合同。",
         attributes=[
             Attribute("project_no", "string", True, True, "core_project.project_no", "项目编号"),
             Attribute("name", "string", True, False, "core_project.name", "项目名称"),
             Attribute("status", "enum", False, False, "core_project.status", "执行态：进行中/已完成/关闭"),
+            Attribute("delivery_mode", "enum", False, False, "core_project.delivery_mode", "交付模式：自主实施/外购采购/分包"),
             # 概算是项目的属性（展示口径），★不参与成本预警判定，故不是 F-project-cost-warning 的入参
             Attribute("estimate", "number", False, False, "(主数据)=硬件预估成本+服务预估成本", "概算(预估成本)"),
             Attribute("budget", "number", False, False, "plm_baseline.total_cost", "预算(概算/预算基线)"),
@@ -86,12 +96,12 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("start_date", "date", False, False, "core_project.start_date", "开始日期"),
             Attribute("end_date", "date", False, False, "core_project.end_date", "结束日期"),
         ],
-        relations=["belongsTo_inv", "hasMilestone", "hasReceipt", "hasPayment", "hasWarning"],
+        relations=["belongsTo_inv", "hasMilestone", "hasOrder", "hasWarning"],
     ),
     "Contract": Entity(
         name="Contract", kind="top",
-        desc="合同（过程·契约凭证，非经营载体）。记录「签了什么、跟谁签、纸面在哪」；"
-             "只关联项目，不承载收款/付款；一个合同可含分包合同。",
+        desc="合同（★财经根对象 / 契约凭证）。发票/回款/保证金/付款全部挂合同（只管钱、不管交付进度）；"
+             "同时是交付源头（一份合同拆分为多个交付项目）。记录「签了什么、跟谁签、纸面在哪」。",
         attributes=[
             Attribute("contract_no", "string", True, True, "contract.contract_no", "合同号"),
             Attribute("name", "string", False, False, "contract.name", "合同名称(○待建列)"),
@@ -102,38 +112,39 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("sign_date", "date", False, False, "contract.sign_date", "签订时间"),
             Attribute("period", "number", False, False, "contract.period", "合同周期(月)"),
             Attribute("sign_gross_profit", "number", False, False, "contract.sign_gross_profit", "签单毛利(○待建列)"),
+            Attribute("payment_terms", "string", False, False, "contract.payment_terms", "付款条款(○待建列)"),
+            Attribute("warranty_terms", "string", False, False, "contract.warranty_terms", "质保条款(○待建列)"),
             Attribute("party_a", "string", False, False, "contract.party_a", "甲方(客户)"),
             Attribute("party_b", "string", False, False, "contract.party_b", "乙方(我方)"),
             Attribute("doc_file", "string", False, False, "contract.doc_file", "合同文本/扫描件(○待建列)"),
             Attribute("archived", "enum", False, False, "contract.archived", "是否归档：未归档/已归档(○待建列)"),
             Attribute("storage_location", "string", False, False, "contract.storage_location", "存放位置(○待建列)"),
         ],
-        relations=["belongsTo", "hasSubContract", "signedWith", "hasWarning"],
+        relations=["belongsTo", "hasSubContract", "signedWith", "hasWarning",
+                   "hasReceipt", "hasPayment", "hasInvoice", "hasDeposit", "fromPreSales_inv"],
     ),
     "Milestone": Entity(
         name="Milestone", kind="child", parent="Project",
-        desc="里程碑（挂项目；分大/小两级，小里程碑是大里程碑的执行拆解）",
+        desc="里程碑（★挂【项目】——交付节点，产值计量的依据，供 PMO 跟踪，与回款周期关联）。"
+             "按合同付款节奏确定；★子里程碑已移除，本实体仅项目级里程碑。",
         attributes=[
             Attribute("ms_no", "string", True, True, "milestone.ms_no", "里程碑编号"),
             Attribute("name", "string", True, False, "milestone.name", "里程碑名称"),
-            Attribute("level", "enum", False, False, "milestone.level", "major(合同里程碑·粗)/minor(执行里程碑·细·○待建列)"),
-            Attribute("plan_date", "date", False, False, "milestone.plan_date", "计划日期"),
+            Attribute("plan_date", "date", False, False, "milestone.plan_date", "计划日期(付款节奏)"),
             Attribute("actual_date", "date", False, False, "milestone.actual_date", "实际日期"),
             Attribute("status", "enum", False, False, "milestone.status", "未开始/进行中/已完成/风险"),
             Attribute("acceptance", "string", False, False, "milestone.acceptance", "验收结论"),
-            Attribute("value", "number", False, False, "milestone.value/plan_output", "大里程碑对应产值(合同额分摊·○待建列)"),
-            Attribute("progress", "number", False, False, "milestone.progress", "小里程碑进度%(○待建列)"),
-            Attribute("parent_ms", "string", False, False, "milestone.parent_ms", "小里程碑→父大里程碑(ms_no·○待建列)"),
         ],
-        relations=["hasMilestone_inv", "decomposedFrom", "realizesReceivable"],
+        relations=["hasMilestone_inv", "hasOutputValue"],
     ),
     "Receipt": Entity(
-        name="Receipt", kind="child", parent="Project",
-        desc="收款/回款单（挂【项目】——执行态的资金流入；里程碑确认产值→开票→账期→回款；"
-             "可分期、可逾期。非合同关联）",
+        name="Receipt", kind="child", parent="Contract",
+        desc="回款单（★挂【合同】——财经根对象的资金流入；实际到账资金，与合同应收对账；"
+             "可分期、可逾期。由项目产值触发的开票申请落地为发票后，回款统一归合同）",
         attributes=[
             Attribute("receipt_no", "string", True, True, "finance_detail.receipt_no", "收款单号(○待建列)"),
-            Attribute("source_milestone", "string", False, False, "finance_detail.source_milestone", "产值来源里程碑(ms_no·○待建列)"),
+            Attribute("source_project_no", "string", False, False, "finance_detail.source_project_no", "产值来源项目号(多项目对应一合同时用于分摊·○待建列)"),
+            Attribute("source_invoice_no", "string", False, False, "finance_detail.source_invoice_no", "对应发票号(○待建列)"),
             Attribute("amount", "number", False, False, "finance_detail.amount", "应收/开票金额"),
             Attribute("invoice_no", "string", False, False, "finance_detail.invoice_no", "发票号(○待建列)"),
             Attribute("invoice_date", "date", False, False, "finance_detail.invoice_date", "开票日(○待建列)"),
@@ -144,15 +155,16 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("payer", "string", False, False, "finance_detail.payer", "付款方(客户)"),
             Attribute("status", "enum", False, False, "finance_detail.status", "待收/部分/已收/逾期(○待建列)"),
         ],
-        relations=["hasReceipt_inv", "sourceMilestone"],
+        relations=["hasReceipt_inv"],
     ),
     "Payment": Entity(
-        name="Payment", kind="child", parent="Project",
-        desc="付款/应付单（挂【项目】——执行态的资金流出；供应商交付→收票→账期→付款；"
-             "可分期、可逾期；source_po ⌛待采购域。非合同关联）",
+        name="Payment", kind="child", parent="Contract",
+        desc="付款/应付单（★挂【合同】——财经根对象的资金流出；我方→供应商/分包，收票→账期→付款；"
+             "可分期、可逾期；source_po ⌛待采购域）",
         attributes=[
             Attribute("payment_no", "string", True, True, "finance_detail.payment_no", "付款单号(○待建列)"),
             Attribute("source_po", "string", False, False, "finance_detail.source_po", "来源采购单(po_no·⌛待采购域接入)"),
+            Attribute("source_project_no", "string", False, False, "finance_detail.source_project_no", "来源项目号(成本分摊·○待建列)"),
             Attribute("amount", "number", False, False, "finance_detail.amount", "应付/开票金额"),
             Attribute("invoice_no", "string", False, False, "finance_detail.invoice_no", "供应商发票号(○待建列)"),
             Attribute("invoice_date", "date", False, False, "finance_detail.invoice_date", "收票日(○待建列)"),
@@ -163,7 +175,7 @@ ENTITIES: Dict[str, Entity] = {
             Attribute("payee", "string", False, False, "finance_detail.payee", "收款方(供应商)"),
             Attribute("status", "enum", False, False, "finance_detail.status", "待付/部分/已付/逾期(○待建列)"),
         ],
-        relations=["hasPayment_inv", "sourceProcurement_out"],
+        relations=["hasPayment_inv"],
     ),
     "Warning": Entity(
         name="Warning", kind="child", parent=None,
@@ -188,47 +200,192 @@ ENTITIES: Dict[str, Entity] = {
         ],
         relations=["hasWarning_inv"],
     ),
+    "Order": Entity(
+        name="Order", kind="child", parent="Project",
+        desc="订单（项目交付执行单元：项目的交付过程分解为订单，聚焦交付落地；"
+             "与里程碑为项目下并行的「交付进度(PMO)」与「执行落地」两个视角）。",
+        attributes=[
+            Attribute("order_no", "string", True, True, "order.order_no", "订单编号"),
+            Attribute("name", "string", True, False, "order.name", "订单名称"),
+            Attribute("source_milestone", "string", False, False, "order.source_milestone", "关联里程碑(ms_no·可选)"),
+            Attribute("status", "enum", False, False, "order.status", "未启动/执行中/已完成/验收"),
+            Attribute("delivery_date", "date", False, False, "order.delivery_date", "交付日期"),
+            Attribute("amount", "number", False, False, "order.amount", "订单金额(合同额分摊·○待建列)"),
+        ],
+        relations=["hasOrder_inv", "hasWorkOrder"],
+    ),
+    "WorkOrder": Entity(
+        name="WorkOrder", kind="child", parent="Order",
+        desc="工单（订单的细化分解；明确工单内容 + 预估成本四分项。初期人员成本由项目经理预估，"
+             "后续由 Task×Person 费率替换）。",
+        attributes=[
+            Attribute("wo_no", "string", True, True, "work_order.wo_no", "工单编号"),
+            Attribute("name", "string", True, False, "work_order.name", "工单名称/内容"),
+            Attribute("status", "enum", False, False, "work_order.status", "待派/执行中/已完成"),
+            Attribute("est_personnel", "number", False, False, "work_order.est_personnel", "预估人员投入成本(初期PM预估)"),
+            Attribute("est_travel", "number", False, False, "work_order.est_travel", "预估差旅投入"),
+            Attribute("est_flexible", "number", False, False, "work_order.est_flexible", "预估灵活用工投入"),
+            Attribute("est_variable", "number", False, False, "work_order.est_variable", "预估变动费用"),
+        ],
+        relations=["hasWorkOrder_inv", "hasTask"],
+    ),
+    "Task": Entity(
+        name="Task", kind="child", parent="WorkOrder",
+        desc="任务（工单的分解，由人员执行；人员有费率可估算滞后成本）。"
+             "★本期仅建实体、不参与成本计算（后续替换工单预估人员成本）。",
+        attributes=[
+            Attribute("task_no", "string", True, True, "task.task_no", "任务编号"),
+            Attribute("name", "string", True, False, "task.name", "任务名称"),
+            Attribute("assignee", "string", False, False, "task.assignee", "执行人(person_no)"),
+            Attribute("est_hours", "number", False, False, "task.est_hours", "预估工时(后续×费率估算)"),
+            Attribute("status", "enum", False, False, "task.status", "待办/进行中/完成"),
+        ],
+        relations=["hasTask_inv", "assignedTo"],
+    ),
+    "Person": Entity(
+        name="Person", kind="top",
+        desc="人员（资源/费率主数据；任务由其执行，费率用于后续估算滞后成本）。参考实体，parent=None。",
+        attributes=[
+            Attribute("person_no", "string", True, True, "person.person_no", "人员编号"),
+            Attribute("name", "string", True, False, "person.name", "姓名"),
+            Attribute("role", "string", False, False, "person.role", "角色/工种"),
+            Attribute("rate", "number", False, False, "person.rate", "费率(元/工时·○待建列)"),
+        ],
+        relations=["assignedTo_inv"],
+    ),
+    # ── LTC 主实体：商机 / 售前(投标)（顶层，独立实体，非附件）──────────────────
+    "Opportunity": Entity(
+        name="Opportunity", kind="top",
+        desc="商机（销售机会，线索转化而来；立项评估、预估收益）。一条商机可发起多轮投标。",
+        attributes=[
+            Attribute("opp_no", "string", True, True, "opportunity.opp_no", "商机编号"),
+            Attribute("name", "string", True, False, "opportunity.name", "商机名称"),
+            Attribute("customer", "string", False, False, "opportunity.customer", "客户"),
+            Attribute("est_amount", "number", False, False, "opportunity.est_amount", "预估收益/商机金额"),
+            Attribute("est_close_date", "date", False, False, "opportunity.est_close_date", "预估成交时间"),
+            Attribute("win_prob", "number", False, False, "opportunity.win_prob", "赢单概率(0~1)"),
+            Attribute("status", "enum", False, False, "opportunity.status", "跟进中/已中标/已丢单"),
+        ],
+        relations=["hasPreSales"],
+    ),
+    "PreSales": Entity(
+        name="PreSales", kind="top",
+        desc="售前(投标)（★独立实体，非商机附件；商机中标前的投标应答阶段）。"
+             "支持同一商机多次投标版本管理；中标后生成一份合同。",
+        attributes=[
+            Attribute("presales_no", "string", True, True, "presales.presales_no", "投标编号"),
+            Attribute("name", "string", True, False, "presales.name", "投标名称"),
+            Attribute("bid_round", "number", False, False, "presales.bid_round", "投标轮次(同一商机可多次)"),
+            Attribute("proposal", "string", False, False, "presales.proposal", "投标方案/标书"),
+            Attribute("quote_list", "string", False, False, "presales.quote_list", "报价清单"),
+            Attribute("bid_open_record", "string", False, False, "presales.bid_open_record", "开标记录"),
+            Attribute("eval_result", "string", False, False, "presales.eval_result", "评标结果"),
+            Attribute("award_notice", "string", False, False, "presales.award_notice", "中标通知书"),
+            Attribute("bid_deposit_no", "string", False, False, "presales.bid_deposit_no", "投标保证金(前置关联·○待建列)"),
+            Attribute("status", "enum", False, False, "presales.status", "投标中/已中标/未中标"),
+        ],
+        relations=["hasPreSales_inv", "winContract"],
+    ),
+    # ── 交付链附属：产值(OutputValue，挂项目·经里程碑) ────────────────────────
+    "OutputValue": Entity(
+        name="OutputValue", kind="child", parent="Milestone",
+        desc="产值记录（★挂【项目·经里程碑】——阶段性完工计量值；产值≠开票金额，"
+             "产值是业务进度，开票是财经动作。一个里程碑可多次产值调整）。",
+        attributes=[
+            Attribute("ov_no", "string", True, True, "output_value.ov_no", "产值记录编号"),
+            Attribute("value", "number", False, False, "output_value.value", "产值计量值(合同额分摊·○待建列)"),
+            Attribute("report_date", "date", False, False, "output_value.report_date", "报量日期"),
+            Attribute("type", "enum", False, False, "output_value.type", "进度产值/变更产值"),
+            Attribute("status", "enum", False, False, "output_value.status", "待审/已确认"),
+        ],
+        relations=["hasOutputValue_inv"],
+    ),
+    # ── 财经链附属：发票 / 保证金（挂合同） ─────────────────────────────────
+    "Invoice": Entity(
+        name="Invoice", kind="child", parent="Contract",
+        desc="发票（★挂【合同】——财经根对象；可由项目产值触发开票申请，但发票本体归属合同）。",
+        attributes=[
+            Attribute("invoice_no", "string", True, True, "finance_detail.invoice_no", "发票号"),
+            Attribute("amount", "number", False, False, "finance_detail.invoice_amount", "开票金额"),
+            Attribute("invoice_date", "date", False, False, "finance_detail.invoice_date", "开票日"),
+            Attribute("type", "enum", False, False, "finance_detail.invoice_type", "专票/普票"),
+            Attribute("source_project_no", "string", False, False, "finance_detail.source_project_no", "产值触发来源项目(○待建列)"),
+            Attribute("status", "enum", False, False, "finance_detail.invoice_status", "已开具/已作废"),
+        ],
+        relations=["hasInvoice_inv"],
+    ),
+    "Deposit": Entity(
+        name="Deposit", kind="child", parent="Contract",
+        desc="保证金（★挂【合同】——财经根对象；投标保证金可前置关联售前，履约保证金归属合同）。",
+        attributes=[
+            Attribute("deposit_no", "string", True, True, "finance_detail.deposit_no", "保证金编号"),
+            Attribute("type", "enum", False, False, "finance_detail.deposit_type", "投标保证金/履约保证金"),
+            Attribute("amount", "number", False, False, "finance_detail.deposit_amount", "保证金金额"),
+            Attribute("pay_date", "date", False, False, "finance_detail.deposit_pay_date", "缴纳日"),
+            Attribute("status", "enum", False, False, "finance_detail.deposit_status", "已缴/已退/已结算"),
+        ],
+        relations=["hasDeposit_inv"],
+    ),
 }
 
 
 # 关系（Link）：主体.谓词(客体) [基数] 说明
 LINKS: List[Dict[str, str]] = [
+    # ── LTC 主链路：商机 → 售前(投标) → 合同 → 项目 ──
+    {"predicate": "hasPreSales", "subj": "Opportunity", "obj": "PreSales", "card": "1:N",
+     "desc": "商机发起投标（一次商机可多轮投标；反向：一次投标仅属一条商机）"},
+    {"predicate": "winContract", "subj": "PreSales", "obj": "Contract", "card": "1:0..1",
+     "desc": "投标中标 → 生成一份合同；未中标则无下游合同（一份合同仅来自一次成功投标）"},
     {"predicate": "belongsTo", "subj": "Contract", "obj": "Project", "card": "N:1",
-     "desc": "合同归属项目（★合同只关联项目；一个项目可有多个合同：主合同+变更+分包合同）"},
+     "desc": "合同归属项目（★合同拆分交付项目；一份合同→多个交付项目，一个交付项目仅属一份合同）"},
     {"predicate": "hasSubContract", "subj": "Contract", "obj": "Contract", "card": "1:N",
-     "desc": "主合同 → 分包合同（自关系：分包合同经 parent_contract_no 指向主合同）"},
+     "desc": "主合同 → 分包合同（自关系：分包合同经 parent_contract_no 指向主合同；分包合同亦归属同一项目）"},
+    # ── 交付链：项目 → 里程碑 → 产值 → 订单 → 工单 → 任务 → 人 ──
     {"predicate": "hasMilestone", "subj": "Project", "obj": "Milestone", "card": "1:N",
-     "desc": "项目里程碑（大/小均挂项目，属执行态）"},
-    {"predicate": "decomposedFrom", "subj": "Milestone", "obj": "Milestone", "card": "N:1",
-     "desc": "小里程碑(执行)按大里程碑(合同)拆解、关联父大里程碑"},
-    {"predicate": "realizesReceivable", "subj": "Milestone", "obj": "Receipt", "card": "1:N",
-     "desc": "大里程碑确认产值，据此生成应收/回款单（产值来源）"},
-    {"predicate": "sourceMilestone", "subj": "Receipt", "obj": "Milestone", "card": "N:1",
-     "desc": "回款单对应的产值来源里程碑"},
-    {"predicate": "hasReceipt", "subj": "Project", "obj": "Receipt", "card": "1:N",
-     "desc": "★项目收款（客户→我方，回款）——收付款挂项目(执行态)而非合同(凭证)"},
-    {"predicate": "hasPayment", "subj": "Project", "obj": "Payment", "card": "1:N",
-     "desc": "★项目付款（我方→供应商/分包，流出）——收付款挂项目(执行态)而非合同(凭证)"},
+     "desc": "项目交付里程碑节点（按付款节奏确定，产值计量依据；子里程碑已移除）"},
+    {"predicate": "hasOutputValue", "subj": "Milestone", "obj": "OutputValue", "card": "1:N",
+     "desc": "里程碑验收后报产值（一个里程碑可多次产值调整；产值是业务进度，非开票金额）"},
+    {"predicate": "hasOrder", "subj": "Project", "obj": "Order", "card": "1:N",
+     "desc": "项目交付订单（执行落地视图；与里程碑并为项目下「进度 vs 执行」双视角）"},
+    {"predicate": "hasWorkOrder", "subj": "Order", "obj": "WorkOrder", "card": "1:N",
+     "desc": "订单的工单分解（细化交付内容 + 预估成本）"},
+    {"predicate": "hasTask", "subj": "WorkOrder", "obj": "Task", "card": "1:N",
+     "desc": "工单的任务分解（由人员执行）"},
+    {"predicate": "assignedTo", "subj": "Task", "obj": "Person", "card": "N:1",
+     "desc": "任务指派给人员（人员费率用于估算滞后成本）"},
+    # ── 财经链（★挂合同，合同是财经根对象）──
+    {"predicate": "hasInvoice", "subj": "Contract", "obj": "Invoice", "card": "1:N",
+     "desc": "合同发票（可由项目产值触发开票申请，但发票本体归属合同）"},
+    {"predicate": "hasReceipt", "subj": "Contract", "obj": "Receipt", "card": "1:N",
+     "desc": "★合同回款（客户→我方，实际到账，与合同应收对账；多项目对应一合同时统一归合同再做分摊）"},
+    {"predicate": "hasPayment", "subj": "Contract", "obj": "Payment", "card": "1:N",
+     "desc": "★合同付款（我方→供应商/分包，流出；收票→账期→付款）"},
+    {"predicate": "hasDeposit", "subj": "Contract", "obj": "Deposit", "card": "1:N",
+     "desc": "合同保证金（投标保证金可前置关联售前，履约保证金归属合同）"},
     {"predicate": "signedWith", "subj": "Contract", "obj": "Supplier", "card": "N:2",
      "desc": "合同签约方（甲方客户/乙方我方或供应商；⌛ Supplier 范围外，仅占位）"},
+    # ── 预警（多态，指回主体）──
     {"predicate": "hasWarning", "subj": "Project", "obj": "Warning", "card": "1:N",
      "desc": "★项目预警（执行态类：成本超支/回款逾期/进度延期…由 Function 判定后写入）"},
     {"predicate": "hasWarning", "subj": "Contract", "obj": "Warning", "card": "1:N",
      "desc": "★合同预警（凭证类：合同到期/未归档…由对应 Function 判定后写入）"},
+    {"predicate": "hasWarning", "subj": "Opportunity", "obj": "Warning", "card": "1:N",
+     "desc": "★商机预警（线索类：商机停滞…由对应 Function 判定后写入）"},
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
 # 范围外占位（⌛ 本版不构建，仅记录以便后续收敛，不进 to_spec 主渲染）
 # ═══════════════════════════════════════════════════════════════════════
-# 范围外实体：Opportunity(商机) / Personnel(人员) / Supplier(供应商) / Procurement(采购)
-#             / Quote(报价单) / CostItem(成本明细·降级为 ABox 数据)。
+# 范围外实体：Supplier(供应商) / Procurement(采购) / Quote(报价单)
+#             / CostItem(成本明细·降级为 ABox 数据)。
+# ★ 商机/Opportunity、售前/PreSales 已于 v6.1 升格为一级实体（LTC 主链路）。
+# ★ Personnel(人员) 已于 v6 升格为 Person 实体（任务执行 + 费率估算）。
 # 范围外关系（待对应场景补充时再加）：
-#   realizes(Opportunity→Project) / ownedBy(Opportunity→Personnel)
-#   managedBy(Project→Personnel) / hasMember(Project→Personnel)
 #   hasProcurement(Project→Procurement) / placedWith(Procurement→Supplier)
 #   payableFrom(Procurement→Payment) / sourceProcurement(Payment→Procurement)
 #   hasCostItem(Project→CostItem) / answersInquiry(Quote→Procurement)
 #   procuresAgainst(Procurement→Contract) / hasQuote(Opportunity→Quote)
+#   managedBy(Project→Person) / hasMember(Project→Person)  # 后续项目-人员管理视角
 
 # 兼容导出：供 9006 /spec 渲染器（历史字段名）
 CONCEPTS = {name: e.desc for name, e in ENTITIES.items()}
@@ -257,30 +414,56 @@ WARNING_LIFECYCLE: Tuple[str, ...] = ("待处理", "已确认", "已处理", "�
 WARNING_TYPES: Tuple[str, ...] = ("成本超支", "回款逾期", "进度延期", "合同到期", "商机停滞")
 # 判定状态 → 预警严重度 固定映射（仅非“正常”才产生 Warning 事实）
 STATUS_TO_SEVERITY: Dict[str, str] = {"预警": "预警", "超支": "严重"}
+
+# ── 成本公式·本体声明（★单一真相：预算/成本分量与物理列映射、滞后口径，平台/智能体一律读取）──
+COST_FORMULA_POLICY: Dict[str, Any] = {
+    "lag_months": 1,
+    "lag_note": "主数据滞后约1个月：视图月 M 看到的是 M-2 月底快照（如 8 月看 6 月底、9 月看 7 月底）",
+    "budget": {
+        "formula": "硬件集成费 + 服务预估成本 + 软件预估实施费",
+        "columns": {"hw_integration_fee": "硬件集成费", "service_est_cost": "服务预估成本",
+                    "sw_est_impl_fee": "软件预估实施费"},
+    },
+    "cost": {
+        "formula": "硬件集成费实际 + 软件实际实施费 + 往年服务直接/间接 + 当年服务直接/间接",
+        "columns": {
+            "hw_integration_actual": "硬件集成费实际", "sw_impl_actual": "软件实际实施费",
+            "prior_svc_direct": "往年实际服务直接成本", "prior_svc_indirect": "往年实际服务间接成本",
+            "curr_svc_direct": "当年实际服务直接成本", "curr_svc_indirect": "当年实际服务间接成本",
+        },
+    },
+    "current_remaining": "预算 − 成本 − 工单预估成本(Σ工单 人员/差旅/灵活用工/变动)",
+    "out_of_scope_columns": ["软件项目分包预估成本", "软件协力分包预估/实际成本", "服务协力分包预估/实际成本",
+                            "往年/当年实际培训费用", "大区/事业部项目直接/间接成本"],
+    "source_function": "F-project-budget / F-project-cost / F-project-current-remaining",
+}
 # 范围外类型（⌛ 待对应场景接入）：合同到期 / 商机停滞 / 回款逾期 / 进度延期 仅有类型占位
 
 
 def cost_warning_rule(budget: Optional[float], current_cost: Optional[float],
+                      wo_est_cost: Optional[float] = 0.0,
                       threshold: float = COST_WARNING_POLICY["warn_ratio"],
                       overrun_ratio: float = COST_WARNING_POLICY["overrun_ratio"]
                       ) -> Tuple[str, str]:
     """项目成本预警·纯语义规则（与 9006 _cost_status 逐字等价，已影子比对）。
 
-    阈值缺省取本体声明 COST_WARNING_POLICY（★单一真相），调用方亦可显式覆盖
-    （用于模拟/假设分析：如试算「80% 提醒 + 100% 严重」的两级口径）。
+    阈值缺省取本体声明 COST_WARNING_POLICY（★单一真相）。成本预警判定的是
+    **有效成本 = 当前成本 + 工单预估成本(wo_est_cost)**，即「当前预估口径」：
+    工单预估用于补主数据滞后缺口（见 COST_FORMULA_POLICY）。wo_est_cost 缺省 0 → 退化为滞后口径。
 
-    入参：budget 预算（None/<=0 视为缺预算）；current_cost 当前成本（缺失按 0）。
+    入参：budget 预算（None/<=0 视为缺预算）；current_cost 当前成本（缺失按 0）；
+          wo_est_cost 工单预估成本（缺失按 0）。
     返回：(status, note)；status ∈ COST_WARNING_STATUS = {正常, 预警, 超支}
     """
     b = budget if budget is not None else None
-    c = current_cost if current_cost is not None else 0.0
+    c = (current_cost if current_cost is not None else 0.0) + (wo_est_cost if wo_est_cost is not None else 0.0)
     if b is None or b <= 0:
         if c > 0:
-            return '正常', '缺预算，暂无法判定预警（当前成本 ¥%s）' % format(round(c), ',')
-        return '正常', '缺预算且无当前成本，无法比较'
+            return '正常', '缺预算，暂无法判定预警（有效成本 ¥%s）' % format(round(c), ',')
+        return '正常', '缺预算且无有效成本，无法比较'
     ratio = c / b if b > 0 else None
     if ratio is not None and ratio > overrun_ratio:
-        return '超支', '当前成本 ¥%s 已超过预算（超支 ¥%s）' % (
+        return '超支', '有效成本 ¥%s 已超过预算（超支 ¥%s）' % (
             format(round(c), ','), format(round(c - b), ','))
     if ratio is not None and ratio >= threshold:
         return '预警', '预算完成比已达 %d%%，接近预算上限' % round(ratio * 100)
@@ -289,30 +472,35 @@ def cost_warning_rule(budget: Optional[float], current_cost: Optional[float],
 
 def project_cost_warning(budget: Optional[float] = None,
                          current_cost: Optional[float] = None,
+                         wo_est_cost: Optional[float] = None,
                          warn_ratio: Optional[float] = None,
                          overrun_ratio: Optional[float] = None) -> Dict[str, Any]:
     """Function F-project-cost-warning 实现：在 cost_warning_rule 之上补齐
-    预算完成比 / 剩余成本 / 严重度，返回结构化结果。纯函数、无 IO。
+    预算完成比 / 当前预估剩余成本 / 严重度，返回结构化结果。纯函数、无 IO。
 
-    阈值缺省取本体声明 COST_WARNING_POLICY（★单一真相）；显式传入则用于假设分析
-    （如试算 80%/100% 两级口径），不改动本体声明本身。
+    口径（★单一真相，见 COST_FORMULA_POLICY）：
+    - 有效成本 = current_cost + wo_est_cost（工单预估补主数据滞后）。
+    - 当前预估剩余成本 = budget - current_cost - wo_est_cost。
+    阈值缺省取本体声明 COST_WARNING_POLICY；显式传入则用于假设分析。
 
     ★入参约定：
-    - 概算 estimate **不是本函数入参**——概算只是 Project 的展示属性，不参与预警判定
-      （v5.1 清理：此前 est 被接收后原样返回，是幽灵参数）。
-    - current_cost 的权威来源是 F-cost-rollup；需从付款/成本明细现算时，
-      请直接调用组合函数 project_cost_warning_from_ledger，勿自行拼装。
+    - 概算 estimate **不是本函数入参**——概算只是 Project 的展示属性，不参与预警判定。
+    - current_cost 的权威来源是 F-cost-rollup；wo_est_cost 的权威来源是 F-workorder-cost-rollup。
+      两者均可在缺省(0)时退化为滞后口径，保证向后兼容。
     """
     c = float(current_cost) if current_cost is not None else 0.0
+    woe = float(wo_est_cost) if wo_est_cost is not None else 0.0
     b = float(budget) if budget is not None else None
     w = float(warn_ratio) if warn_ratio is not None else COST_WARNING_POLICY["warn_ratio"]
     o = float(overrun_ratio) if overrun_ratio is not None else COST_WARNING_POLICY["overrun_ratio"]
-    status, note = cost_warning_rule(b, c, threshold=w, overrun_ratio=o)
-    ratio = round(c / b, 4) if (b is not None and b > 0) else None
-    remaining = round(b - c, 2) if (b is not None and c is not None) else None
+    effective = c + woe
+    status, note = cost_warning_rule(b, c, wo_est_cost=woe, threshold=w, overrun_ratio=o)
+    ratio = round(effective / b, 4) if (b is not None and b > 0) else None
+    remaining = round(b - c - woe, 2) if (b is not None and c is not None) else None
     return {
         'status': status, 'note': note, 'budget': b,
-        'current_cost': c, 'budget_ratio': ratio, 'remaining_cost': remaining,
+        'current_cost': c, 'wo_est_cost': woe, 'effective_cost': round(effective, 2),
+        'budget_ratio': ratio, 'remaining_cost': remaining,
         # ── 供 raiseProjectCostWarning 写 Warning 实体（预警事实）所需字段 ──
         'severity': STATUS_TO_SEVERITY.get(status),      # 正常 → None（不产生预警事实）
         'threshold': w, 'overrun_ratio': o,
@@ -535,6 +723,88 @@ def project_roi(revenue: float = 0.0, current_cost: float = 0.0) -> Dict[str, An
     return {"roi": round((r - c) / c, 4), "revenue": r, "current_cost": c}
 
 
+# ── 成本双口径·本体声明实现（★单一真相，分量物理列见 COST_FORMULA_POLICY）──────────
+def project_budget(hw_integration_fee: float = 0.0, service_est_cost: float = 0.0,
+                   sw_est_impl_fee: float = 0.0) -> Dict[str, Any]:
+    """Function F-project-budget 实现：预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费。
+
+    分量物理列见 COST_FORMULA_POLICY.budget.columns（★单一真相）。纯函数、无 IO。
+    """
+    b = round(float(hw_integration_fee) + float(service_est_cost) + float(sw_est_impl_fee), 2)
+    return {
+        "budget": b,
+        "breakdown": {
+            "hw_integration_fee": round(float(hw_integration_fee), 2),
+            "service_est_cost": round(float(service_est_cost), 2),
+            "sw_est_impl_fee": round(float(sw_est_impl_fee), 2),
+        },
+        "source_function": "F-project-budget",
+    }
+
+
+def project_cost(hw_integration_actual: float = 0.0, sw_impl_actual: float = 0.0,
+                prior_svc_direct: float = 0.0, prior_svc_indirect: float = 0.0,
+                curr_svc_direct: float = 0.0, curr_svc_indirect: float = 0.0) -> Dict[str, Any]:
+    """Function F-project-cost 实现：成本 = 硬件集成费实际 + 软件实际实施费
+    + 往年服务直接/间接 + 当年服务直接/间接（主数据，滞后约1月，见 COST_FORMULA_POLICY）。
+
+    纯函数、无 IO。
+    """
+    cost = round(float(hw_integration_actual) + float(sw_impl_actual)
+                + float(prior_svc_direct) + float(prior_svc_indirect)
+                + float(curr_svc_direct) + float(curr_svc_indirect), 2)
+    return {
+        "cost": cost,
+        "breakdown": {
+            "hw_integration_actual": round(float(hw_integration_actual), 2),
+            "sw_impl_actual": round(float(sw_impl_actual), 2),
+            "prior_svc_direct": round(float(prior_svc_direct), 2),
+            "prior_svc_indirect": round(float(prior_svc_indirect), 2),
+            "curr_svc_direct": round(float(curr_svc_direct), 2),
+            "curr_svc_indirect": round(float(curr_svc_indirect), 2),
+        },
+        "source_function": "F-project-cost",
+    }
+
+
+def project_cost_remaining(budget: Optional[float] = None, cost: float = 0.0) -> Dict[str, Any]:
+    """Function F-project-cost-remaining 实现：滞后剩余成本 = 预算 − 成本（主数据快照口径）。
+
+    缺有效预算(budget<=0/None) → remaining_cost=None（防误报）。纯函数、无 IO。
+    """
+    b = float(budget) if budget is not None else None
+    c = float(cost) if cost is not None else 0.0
+    remaining = round(b - c, 2) if (b is not None and b > 0) else None
+    return {"budget": b, "cost": c, "remaining_cost": remaining,
+            "source_function": "F-project-cost-remaining"}
+
+
+def workorder_cost_rollup(workorders: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Function F-workorder-cost-rollup 实现：工单预估成本 = Σ工单(人员+差旅+灵活用工+变动)。
+
+    用于补主数据滞后缺口；初期工单人员成本由项目经理预估，后续可由 Task×Person 费率替换。
+    纯函数、无 IO。
+    """
+    wos = workorders or []
+    est = round(sum(float(wo.get(k) or 0) for wo in wos
+                   for k in ("est_personnel", "est_travel", "est_flexible", "est_variable")), 2)
+    return {"wo_est_cost": est, "count": len(wos), "source_function": "F-workorder-cost-rollup"}
+
+
+def project_current_remaining(budget: Optional[float] = None, cost: float = 0.0,
+                              wo_est_cost: float = 0.0) -> Dict[str, Any]:
+    """Function F-project-current-remaining 实现：当前预估剩余成本 = 预算 − 成本 − 工单预估成本。
+
+    即在滞后口径上叠加执行侧工单预估，反映更及时的真实剩余。缺有效预算 → None。纯函数、无 IO。
+    """
+    b = float(budget) if budget is not None else None
+    c = float(cost) if cost is not None else 0.0
+    woe = float(wo_est_cost) if wo_est_cost is not None else 0.0
+    remaining = round(b - c - woe, 2) if (b is not None and b > 0) else None
+    return {"budget": b, "cost": c, "wo_est_cost": woe, "current_remaining_cost": remaining,
+            "source_function": "F-project-current-remaining"}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 计算分发器：供 9006 / demo 共用，确保"算法只在 ontos 一份"
 # ═══════════════════════════════════════════════════════════════════════
@@ -561,6 +831,16 @@ _COMPUTE_FUNCS = {
     "F-project-roi": project_roi,
     "cost_rollup": cost_rollup,
     "F-cost-rollup": cost_rollup,
+    "project_budget": project_budget,
+    "F-project-budget": project_budget,
+    "project_cost": project_cost,
+    "F-project-cost": project_cost,
+    "project_cost_remaining": project_cost_remaining,
+    "F-project-cost-remaining": project_cost_remaining,
+    "workorder_cost_rollup": workorder_cost_rollup,
+    "F-workorder-cost-rollup": workorder_cost_rollup,
+    "project_current_remaining": project_current_remaining,
+    "F-project-current-remaining": project_current_remaining,
     "receivable_status": receivable_status,
     "F-receivable-status": receivable_status,
     "project_cost_warning": project_cost_warning,
@@ -681,12 +961,14 @@ _FUNCTION_DEFS: List[Definition] = [
                   "budget>0 时：budget_ratio=current_cost/budget，"
                   "status=超支 iff budget_ratio>overrun_ratio，"
                   "status=预警 iff warn_ratio<=budget_ratio<=overrun_ratio",
-        version="0.7", ontology_bound=True,
+        version="0.8", ontology_bound=True,
         meta={"policy": COST_WARNING_POLICY, "status_enum": COST_WARNING_STATUS,
               "severity_map": STATUS_TO_SEVERITY,
               # ★声明依赖：current_cost 的权威来源，禁止调用方自行拼装
-              "depends_on": ["F-cost-rollup"],
+              "depends_on": ["F-cost-rollup", "F-workorder-cost-rollup"],
               "current_cost_source": "F-cost-rollup",
+              "wo_est_cost_source": "F-workorder-cost-rollup",
+              "current_remaining": "budget - current_cost - wo_est_cost（见 COST_FORMULA_POLICY）",
               "composite": "F-project-cost-warning-from-ledger"},
     ),
     Definition(
@@ -717,6 +999,47 @@ _FUNCTION_DEFS: List[Definition] = [
         invariant="current_cost>0 implies roi=(revenue-current_cost)/current_cost",
         version="0.5", ontology_bound=True,
     ),
+    Definition(
+        id="F-project-budget", name="项目预算", kind="function", domain="project",
+        description="预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
+        inputs=["hw_integration_fee", "service_est_cost", "sw_est_impl_fee"],
+        outputs=["budget", "breakdown", "source_function"],
+        invariant="budget = hw_integration_fee + service_est_cost + sw_est_impl_fee",
+        version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
+    ),
+    Definition(
+        id="F-project-cost", name="项目成本", kind="function", domain="project",
+        description="成本 = 硬件集成费实际 + 软件实际实施费 + 往年服务直接/间接 + 当年服务直接/间接"
+                    "（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
+        inputs=["hw_integration_actual", "sw_impl_actual", "prior_svc_direct", "prior_svc_indirect",
+                "curr_svc_direct", "curr_svc_indirect"],
+        outputs=["cost", "breakdown", "source_function"],
+        invariant="cost = hw_integration_actual + sw_impl_actual + prior_svc_direct + prior_svc_indirect"
+                  " + curr_svc_direct + curr_svc_indirect",
+        version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
+    ),
+    Definition(
+        id="F-project-cost-remaining", name="滞后剩余成本", kind="function", domain="project",
+        description="滞后剩余成本 = 预算 − 成本（主数据快照口径，未叠加工单预估）。",
+        inputs=["budget", "cost"], outputs=["budget", "cost", "remaining_cost", "source_function"],
+        invariant="remaining_cost = budget - cost (budget>0)", version="0.1", ontology_bound=True,
+    ),
+    Definition(
+        id="F-workorder-cost-rollup", name="工单预估成本汇总", kind="function", domain="project",
+        description="工单预估成本 = Σ工单(人员投入+差旅+灵活用工+变动费用)；用于补主数据滞后缺口。"
+                    "初期人员成本由项目经理预估，后续可由 Task×Person 费率替换。",
+        inputs=["workorders"], outputs=["wo_est_cost", "count", "source_function"],
+        invariant="wo_est_cost = Σ(est_personnel+est_travel+est_flexible+est_variable) and >=0",
+        version="0.1", ontology_bound=True,
+    ),
+    Definition(
+        id="F-project-current-remaining", name="当前预估剩余成本", kind="function", domain="project",
+        description="当前预估剩余成本 = 预算 − 成本 − 工单预估成本（叠加执行侧工单预估，反映更及时真实剩余）。",
+        inputs=["budget", "cost", "wo_est_cost"],
+        outputs=["budget", "cost", "wo_est_cost", "current_remaining_cost", "source_function"],
+        invariant="current_remaining_cost = budget - cost - wo_est_cost (budget>0)",
+        version="0.1", ontology_bound=True, meta={"policy": COST_FORMULA_POLICY},
+    ),
 ]
 
 # 声明 + 实现绑定（单一真相，平台/智能体共享）
@@ -729,6 +1052,11 @@ _FUNCTION_IMPLS = {
     "F-project-cost-warning-from-ledger": project_cost_warning_from_ledger,
     "F-cost-rollup": cost_rollup,
     "F-project-roi": project_roi,
+    "F-project-budget": project_budget,
+    "F-project-cost": project_cost,
+    "F-project-cost-remaining": project_cost_remaining,
+    "F-workorder-cost-rollup": workorder_cost_rollup,
+    "F-project-current-remaining": project_current_remaining,
 }
 
 
@@ -737,16 +1065,17 @@ _FUNCTION_IMPLS = {
 # ═══════════════════════════════════════════════════════════════════════
 ACTIONS_PROJ = {
     "recordReceipt": {
-        "定义": "记录一笔收款（客户→我方，流入/回款；含产值来源/开票/账期/已收）。挂【项目】。",
-        "条件": ["关联项目已立", "source_milestone 已确认产值（realizesReceivable）"],
-        "效果": "新增 Receipt（挂项目；含 source_milestone/发票/账期/received_amount），"
-                "建立 hasReceipt(Project→Receipt) + sourceMilestone。",
+        "定义": "记录一笔回款（客户→我方，流入；实际到账，与合同应收对账）。★挂【合同】（财经根对象），"
+                "经 source_project_no 关联产值来源项目以便多项目分摊。",
+        "条件": ["关联合同已立", "对应发票已开具（invoice-before-receipt）"],
+        "效果": "新增 Receipt（挂合同；含 source_project_no/source_invoice_no/发票/账期/received_amount），"
+                "建立 hasReceipt(Contract→Receipt)。",
         "不变量": ["receipt_no 全局唯一", "amount>=0", "received_amount<=amount", "invoiced=已开票 方可回款"], "幂等": True,
     },
     "recordPayment": {
-        "定义": "记录一笔付款（我方→供应商/分包，流出；含开票/账期/已付；source_po ⌛待采购域）。挂【项目】。",
-        "条件": ["关联项目已立"],
-        "效果": "新增 Payment（挂项目；含发票/账期/paid_amount），建立 hasPayment(Project→Payment)。",
+        "定义": "记录一笔付款（我方→供应商/分包，流出；含开票/账期/已付；source_po ⌛待采购域）。★挂【合同】（财经根对象）。",
+        "条件": ["关联合同已立"],
+        "效果": "新增 Payment（挂合同；含 source_project_no/发票/账期/paid_amount），建立 hasPayment(Contract→Payment)。",
         "不变量": ["payment_no 全局唯一", "amount>=0", "paid_amount<=amount"], "幂等": True,
     },
     "createSubContract": {
@@ -757,19 +1086,21 @@ ACTIONS_PROJ = {
                  "不得自引用（合同不能是自己的父合同）", "分包合同仍须 belongsTo 某项目"], "幂等": True,
     },
     "confirmMilestoneValue": {
-        "定义": "大里程碑达成（初验）确认产值(value)，建立 realizesReceivable 关系（可据此开票回款）。",
-        "条件": ["里程碑已立(且 level=major)", "验收结论已填（acceptance）", "value>=0"],
-        "效果": "更新 Milestone.value + status=已完成；建立 realizesReceivable(Milestone→Receipt)。",
-        "不变量": ["value>=0", "未确认产值不得生成应收", "仅 major 里程碑可确认产值"], "幂等": True,
+        "定义": "里程碑达成（初验）后报产值（OutputValue），建立 hasOutputValue(Milestone→OutputValue) 关系。",
+        "条件": ["里程碑已立", "验收结论已填（acceptance）", "产值 value>=0"],
+        "效果": "新增 OutputValue（挂项目·经里程碑；含 value/report_date/type/status）；"
+                "建立 hasOutputValue(Milestone→OutputValue)。★产值≠开票，仅业务进度计量。",
+        "不变量": ["value>=0", "未确认产值不得触发开票申请"], "幂等": True,
     },
-    "createMinorMilestone": {
-        "定义": "在大里程碑下新建小里程碑（执行拆解，按月份/任务细化），关联父大里程碑。",
-        "条件": ["父大里程碑(Milestone.level=major)已立"],
-        "效果": "新增 Milestone(level=minor)，建立 decomposedFrom(→父大里程碑)。",
-        "不变量": ["ms_no 全局唯一", "parent_ms 必须指向一 major 里程碑"], "幂等": True,
+    "applyInvoice": {
+        "定义": "由项目产值达标触发开票申请，落地为合同发票（Invoice）。★产值(项目)与发票(合同)是「触发」非「归属」关系。",
+        "条件": ["关联合同已立", "存在已确认产值(OutputValue.status=已确认)", "开票金额>0"],
+        "效果": "新增 Invoice（挂合同；含 amount/invoice_date/source_project_no），建立 hasInvoice(Contract→Invoice)；"
+                "回款经 recordReceipt 统一归合同后再按 source_project_no 分摊。",
+        "不变量": ["invoice_no 全局唯一", "amount>0", "发票本体归属合同、不挂项目", "同一产值仅可触发一次开票申请"], "幂等": True,
     },
     "completeMilestone": {
-        "定义": "标记里程碑完成（含实际日期/验收结论；小里程碑完成可累加 project 进度）。",
+        "定义": "标记里程碑完成（含实际日期/验收结论）。",
         "条件": ["里程碑已立"],
         "效果": "更新 Milestone.status=已完成 + actual_date + acceptance。",
         "不变量": ["actual_date 不早于 plan_date(软约束，可标注延期)"], "幂等": True,
@@ -801,15 +1132,18 @@ INVARIANTS = [
     {"id": "cost-warning-only-with-budget", "desc": "成本预警只在具备有效预算时判定；缺预算不得误报超支"},
     {"id": "traceable-action", "desc": "一切变更动作须可追溯到发起方（人/数字员工）并留审计"},
     {"id": "payment-receipt-distinct", "desc": "收款(流入/回款)与付款(流出)为独立实体，方向不同不得混用"},
-    {"id": "receivable-from-milestone", "desc": "回款单须源自里程碑确认的产值(source_milestone=realizesReceivable)，无产值不回款"},
+    {"id": "value-invoice-receipt-chain", "desc": "★产值(项目/里程碑)触发开票申请→发票(挂合同)→回款(挂合同)；"
+                                               "产值与发票是「触发」非「归属」关系，发票/回款本体一律归属合同，不得挂项目"},
     {"id": "invoice-before-receipt", "desc": "回款/付款须先开票(invoiced=已开票)，账期自开票日起算，到期未回为逾期"},
     {"id": "received-not-exceed-amount", "desc": "已回款/已付金额不得大于应收/应付金额"},
-    {"id": "milestone-level-model", "desc": "小里程碑须通过 decomposedFrom 关联大里程碑（大里程碑确认产值，小里程碑跟踪执行）"},
+    {"id": "no-sub-milestone", "desc": "★子里程碑已移除：里程碑仅项目级（按付款节奏确定产值），执行拆解由 Order→WorkOrder→Task 承担"},
+    {"id": "finance-on-contract", "desc": "★财经根对象=合同：发票/回款/保证金/付款全部挂合同（只管钱、不管交付进度）；"
+                                         "多项目对应同一合同时回款统一对账到合同，再在项目间做成本/资金分摊"},
+    {"id": "milestone-value-on-project", "desc": "★里程碑与产值挂项目（交付进度聚合根），不和合同直接绑定；"
+                                               "合同只管财经，不承载交付进度"},
     {"id": "capital-occupation-nonnegative", "desc": "资金占用各项(已付/应收未收/净占用)均非负"},
-    # ── v5 核心修正：项目为核心（执行态），合同为过程（契约凭证）──
-    {"id": "project-is-root", "desc": "★项目是经营聚合根：收款/付款/里程碑/成本全部挂项目（执行态），不得挂在合同下"},
-    {"id": "contract-is-process", "desc": "★合同是过程/契约凭证：只关联项目(belongsTo)，不直接承载收款/付款；"
-                                         "须记录合同文本·签订时间·是否归档·存放位置"},
+    {"id": "ltc-chain-order", "desc": "★主业务时序：商机→售前(投标)→合同→项目(自主/采购/分包)；"
+                                     "投标文档属独立售前实体（非商机附件）；未中标无下游合同"},
     {"id": "subcontract-parent-valid", "desc": "分包合同须经 hasSubContract 指向已存在的主合同，且不得自引用"},
 ]
 
@@ -844,14 +1178,14 @@ def validate_project_action(action_id: str, abox: Dict[str, Any]) -> Tuple[bool,
     status = abox.get("status") or ""
     closed = status.upper() in ("CLOSED", "ARCHIVED", "CANCELLED")
     facts = {
-        # v5：收付款挂项目（执行态），故前置以「项目已立」为准
+        # LTC v6.1：里程碑/产值挂项目、财经(发票/回款)挂合同；动作前置按主体区分
         "项目已立": has_proj,
         "关联项目已立": has_proj,
         "关联合同已立": bool(abox.get("contract_no")),   # 兼容历史条件串
         "主合同已立": bool(abox.get("contract_no")),     # createSubContract 前置
-        "source_milestone 已确认产值（realizesReceivable）": True,  # 细则由 ABox 校验器后续加强
-        "里程碑已立(且 level=major)": has_proj,
+        "存在已确认产值（OutputValue.status=已确认）": True,  # 细则由 ABox 校验器后续加强
         "里程碑已立": has_proj,
+        "里程碑已立(且 level=major)": has_proj,
         "父大里程碑(Milestone.level=major)已立": has_proj,
         # ★判定状态由本体函数现算，调用方无法伪造（修复此前条件串不匹配导致的护栏空转）
         "成本预警状态 ∈ {预警, 超支}": abox.get("cost_status") in ("预警", "超支"),
@@ -885,7 +1219,7 @@ def to_spec() -> Dict[str, Any]:
         ],
         "invariants": INVARIANTS,
         # ── 本体声明的阈值策略与枚举（★单一真相：平台/智能体一律读取，不得自行硬编码）──
-        "policies": {"costWarning": COST_WARNING_POLICY},
+        "policies": {"costWarning": COST_WARNING_POLICY, "costFormula": COST_FORMULA_POLICY},
         "enums": {
             "costWarningStatus": COST_WARNING_STATUS,
             "warningSeverity": WARNING_SEVERITY,

@@ -185,6 +185,14 @@ def test_all_functions_reachable_via_dispatch():
         "cost_rollup": {"payments": [], "cost_detail_rows": []},
         "receivable_status": {"amount": 100, "received_amount": 50},
         "project_cost_warning": {"budget": 1000, "current_cost": 800},
+        "project_cost_warning_from_ledger": {"budget": 1000, "payments": [], "cost_detail_rows": []},
+        "project_budget": {"hw_integration_fee": 100, "service_est_cost": 50, "sw_est_impl_fee": 30},
+        "project_cost": {"hw_integration_actual": 80, "sw_impl_actual": 40, "prior_svc_direct": 10,
+                        "prior_svc_indirect": 5, "curr_svc_direct": 8, "curr_svc_indirect": 7},
+        "project_cost_remaining": {"budget": 1000, "cost": 800},
+        "workorder_cost_rollup": {"workorders": [{"est_personnel": 20, "est_travel": 5,
+                                                 "est_flexible": 3, "est_variable": 2}]},
+        "project_current_remaining": {"budget": 1000, "cost": 800, "wo_est_cost": 30},
     }
     # 同时用 F- 前缀键验证 _COMPUTE_FUNCS 双命名注册完整
     for fid in ids:
