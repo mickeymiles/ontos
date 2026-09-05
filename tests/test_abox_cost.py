@@ -120,3 +120,76 @@ def test_abox_adapter_declared_in_policy():
     for k in ('table', 'key', 'name', 'budget', 'current_cost'):
         assert AB.get(k), f'abox_adapter 缺 {k}'
     assert AB['table'] == 'md_contract'
+
+
+# ── 项目档案 / 成本明细（智能体「项目管理专家」数据源）────────────
+
+
+@pytest.fixture
+def profile_db(tmp_path):
+    """含档案列与成本分量列的临时库"""
+    p = str(tmp_path / "profile.db")
+    conn = sqlite3.connect(p)
+    cols = [AB["key"], AB["name"], AB["budget"], AB["current_cost"],
+            AB["profile"]["dept"], AB["profile"]["owner"], AB["profile"]["region"],
+            AB["profile"]["status"], AB["profile"]["amount"]]
+    cols += list(COST_FORMULA_POLICY["budget"]["columns"].values())
+    cols += list(COST_FORMULA_POLICY["cost"]["columns"].values())
+    conn.execute('CREATE TABLE md_contract (%s)' %
+                 ','.join('"%s" TEXT' % c for c in cols))
+    vals = {AB["key"]: 'CSZB2211422A', AB["name"]: '某集成项目',
+            AB["budget"]: 100000, AB["current_cost"]: 120000,
+            AB["profile"]["dept"]: '大客户部', AB["profile"]["owner"]: '张三',
+            AB["profile"]["region"]: '华北', AB["profile"]["status"]: '执行中',
+            AB["profile"]["amount"]: 500000}
+    vals.update({c: 10000 for c in COST_FORMULA_POLICY["budget"]["columns"].values()})
+    vals.update({c: 20000 for c in COST_FORMULA_POLICY["cost"]["columns"].values()})
+    conn.execute('INSERT INTO md_contract (%s) VALUES (%s)' % (
+        ','.join('"%s"' % c for c in cols), ','.join('?' * len(cols))),
+        [vals[c] for c in cols])
+    conn.commit()
+    conn.close()
+    return p
+
+
+def test_project_facts(profile_db):
+    rows = abox_cost.project_facts(profile_db)
+    assert len(rows) == 1
+    r = rows[0]
+    # 兼容智能体工具契约：project_id = 合同编号
+    assert r['project_id'] == 'CSZB2211422A' == r['contract_no']
+    assert r['name'] == '某集成项目'
+    assert r['dept'] == '大客户部' and r['owner'] == '张三' and r['region'] == '华北'
+    assert r['status'] == '执行中' and r['amount'] == 500000
+    # 预算/成本 + 本体预警判定
+    assert r['budget'] == 100000 and r['current_cost'] == 120000
+    assert r['cost_status'] == '超支' and r['budget_ratio'] == 1.2
+    # ⌛四算未接入：不得用假值填充
+    assert r['four_calc']['available'] is False
+    assert '四算' in r['four_calc']['blocked_by']
+
+
+def test_project_facts_single(profile_db):
+    assert abox_cost.project_facts(profile_db, contract_no='NOPE') == []
+    assert len(abox_cost.project_facts(profile_db, contract_no='CSZB2211422A')) == 1
+
+
+def test_project_cost_detail(profile_db):
+    rows = abox_cost.project_cost_detail(profile_db)
+    r = rows[0]
+    # 分量列名取 COST_FORMULA_POLICY（单一真相）
+    assert set(r['budget_items']) == set(COST_FORMULA_POLICY["budget"]["columns"])
+    assert set(r['cost_items']) == set(COST_FORMULA_POLICY["cost"]["columns"])
+    assert all(v == 10000 for v in r['budget_items'].values())
+    assert all(v == 20000 for v in r['cost_items'].values())
+    assert r['cost_status'] == '超支'
+
+
+def test_not_available_no_fake_data():
+    """★红线：未接入的数据域必须显式声明未接入，不得返回演示/估算数据"""
+    r = abox_cost.not_available('workhour')
+    assert r['available'] is False
+    assert r['domain'] == 'workhour'
+    assert '工时' in r['blocked_by']
+    assert '不做估算' in r['message']
+    assert abox_cost.not_available('task')['available'] is False

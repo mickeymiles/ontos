@@ -592,6 +592,18 @@ COST_FORMULA_POLICY: Dict[str, Any] = {
         "budget": "累计实施成本预估",         # ≡ 上方 budget 三分量之和（impl_source）
         "current_cost": "累计实施成本实际",   # ≡ 上方 cost 六分量之和（impl_source）
         "project_no": "",                     # 空 = 源表无独立项目号列，缺省取 key（合同:项目=1:1）
+        # 项目档案列（智能体「项目管理专家」的项目画像；均为总合同表 v2 实测存在的列）
+        "profile": {
+            "name": "项目描述", "dept": "部门", "owner": "责任人", "region": "区域",
+            "status": "合同状态", "sign_date": "合同签定时间", "amount": "合同总金额",
+            "customer": "客户简称", "year": "年份", "industry": "行业",
+        },
+        # ⌛未接入的数据域：这些查询**不得**用假数据兜底，必须显式返回「未接入」
+        "not_available": {
+            "workhour": "工时/日报：md_contract 205 列无工时列，plm_timesheet 等表为空，PMO 域未建设",
+            "task": "工单/任务：两单一物数据源未接入（plm_task / plm_assignment 为空表）",
+            "four_calc": "四算（概算/预算/核算/决算）：审批流数据未接入，见 RESERVED_FIELDS",
+        },
     },
     "out_of_scope_columns": ["软件项目分包预估成本", "软件协力分包预估/实际成本", "服务协力分包预估/实际成本",
                             "往年/当年实际培训费用", "大区/事业部项目直接/间接成本"],

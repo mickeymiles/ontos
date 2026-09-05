@@ -29,6 +29,35 @@ from .domain_business import COST_FORMULA_POLICY, functions
 ABOX_ADAPTER: Dict[str, str] = COST_FORMULA_POLICY["abox_adapter"]
 
 
+def _available_columns(conn: sqlite3.Connection, table: str) -> set:
+    """物理表实际存在的列名集合（表不存在 → 空集）。"""
+    try:
+        return {r[1] for r in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _query_rows(conn: sqlite3.Connection, table: str, wanted: List[str],
+                where_col: Optional[str] = None, where_val: Optional[str] = None,
+                limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """按「实际存在的列」组装查询并返回 dict 列表（不依赖调用方 row_factory）。"""
+    cols = _available_columns(conn, table)
+    fields = [c for c in wanted if c in cols]
+    if not fields:
+        return []
+    sql = 'SELECT %s FROM "%s"' % (','.join('"%s"' % c for c in fields), table)
+    args: List[Any] = []
+    if where_col and where_col in cols and where_val:
+        sql += ' WHERE "%s" = ?' % where_col
+        args.append(where_val)
+    if limit:
+        sql += ' LIMIT ?'
+        args.append(limit)
+    cur = conn.execute(sql, tuple(args))
+    sel = [d[0] for d in cur.description]
+    return [dict(zip(sel, r)) for r in cur.fetchall()]
+
+
 def _num(v) -> Optional[float]:
     """转 float；None/非数值 → None（缺失即缺失，不当 0 处理）。"""
     if v is None or v == '':
@@ -37,6 +66,144 @@ def _num(v) -> Optional[float]:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def not_available(domain: str) -> Dict[str, Any]:
+    """⌛未接入数据域的标准响应（★红线：禁止用假数据兜底——宁可说没有，不可编）。
+
+    智能体侧据此如实告知用户「该数据尚未接入」，而不是用演示数据冒充真实业务数据
+    （历史教训：P-2026-* 假项目被当成真实项目，连成本分析结论都是错的）。
+    """
+    na = ABOX_ADAPTER.get("not_available") or {}
+    blocked = na.get(domain, f'{domain} 数据源未接入')
+    return {
+        'available': False,
+        'domain': domain,
+        'blocked_by': blocked,
+        'message': f'本体中尚无「{domain}」数据（{blocked}）。不做估算、不返回演示数据；'
+                   f'数据源接入后本工具自动可用。',
+    }
+
+
+def project_facts(db: Union[str, sqlite3.Connection],
+                  contract_no: Optional[str] = None,
+                  limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """项目档案 + 预算/成本 + 本体预警判定（★9006 与 9007 同源）。
+
+    智能体（项目管理专家）的「项目画像」数据源：读 md_contract 档案列（部门/责任人/
+    区域/合同状态/签约额…）+ 预算/成本加工列，再逐项目调 F-project-cost-warning。
+    返回字段名兼顾智能体既有工具契约：project_id = 合同编号（源表无独立项目号列）。
+    """
+    prof = ABOX_ADAPTER.get("profile") or {}
+    wanted = [ABOX_ADAPTER["key"], ABOX_ADAPTER["budget"], ABOX_ADAPTER["current_cost"]]
+    wanted += [c for c in prof.values() if isinstance(c, str)]
+
+    own = False
+    if isinstance(db, sqlite3.Connection):
+        conn = db
+    else:
+        conn = sqlite3.connect(db)
+        own = True
+    try:
+        rows = _query_rows(conn, ABOX_ADAPTER["table"], wanted,
+                           where_col=ABOX_ADAPTER["key"], where_val=contract_no,
+                           limit=limit)
+    finally:
+        if own:
+            conn.close()
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for r in rows:
+        cno = str(r.get(ABOX_ADAPTER["key"]) or '').strip()
+        if not cno or cno == ABOX_ADAPTER["key"] or cno in seen:
+            continue
+        seen.add(cno)
+        budget = _num(r.get(ABOX_ADAPTER["budget"]))
+        current_cost = round(_num(r.get(ABOX_ADAPTER["current_cost"])) or 0.0, 2)
+        warn = functions.call("F-project-cost-warning", budget=budget,
+                              current_cost=current_cost, wo_est_cost=0.0)
+        out.append({
+            'project_id': cno,                 # 兼容智能体工具契约（= 合同编号）
+            'contract_no': cno,
+            'name': str(r.get(prof.get('name', '') or '') or ''),
+            'dept': r.get(prof.get('dept', '') or '') or '',
+            'owner': r.get(prof.get('owner', '') or '') or '',
+            'region': r.get(prof.get('region', '') or '') or '',
+            'status': r.get(prof.get('status', '') or '') or '',
+            'sign_date': r.get(prof.get('sign_date', '') or '') or '',
+            'amount': _num(r.get(prof.get('amount', '') or '')),
+            'customer': r.get(prof.get('customer', '') or '') or '',
+            'year': r.get(prof.get('year', '') or '') or '',
+            'industry': r.get(prof.get('industry', '') or '') or '',
+            'budget': budget,
+            'current_cost': current_cost,
+            'budget_ratio': warn['budget_ratio'],
+            'remaining_cost': warn['remaining_cost'],
+            'cost_status': warn['status'],           # 正常 / 预警 / 超支（本体判定）
+            'cost_note': warn['note'],
+            # ⌛四算未接入：不得用假值填充（见 abox_adapter.not_available）
+            'four_calc': {'available': False,
+                          'blocked_by': (ABOX_ADAPTER.get('not_available') or {}).get(
+                              'four_calc', '四算审批流数据未接入')},
+        })
+    return out
+
+
+def project_cost_detail(db: Union[str, sqlite3.Connection],
+                        contract_no: Optional[str] = None,
+                        limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """成本明细：预算三分量 / 成本六分量 + 合计 + 本体预警（★与 9006 同源）。
+
+    分量列名取 COST_FORMULA_POLICY 的 budget.columns / cost.columns（单一真相）。
+    """
+    budget_cols = COST_FORMULA_POLICY["budget"]["columns"]
+    cost_cols = COST_FORMULA_POLICY["cost"]["columns"]
+    wanted = [ABOX_ADAPTER["key"], ABOX_ADAPTER["name"],
+              ABOX_ADAPTER["budget"], ABOX_ADAPTER["current_cost"]]
+    wanted += list(budget_cols.values()) + list(cost_cols.values())
+
+    own = False
+    if isinstance(db, sqlite3.Connection):
+        conn = db
+    else:
+        conn = sqlite3.connect(db)
+        own = True
+    try:
+        rows = _query_rows(conn, ABOX_ADAPTER["table"], wanted,
+                           where_col=ABOX_ADAPTER["key"], where_val=contract_no,
+                           limit=limit)
+    finally:
+        if own:
+            conn.close()
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for r in rows:
+        cno = str(r.get(ABOX_ADAPTER["key"]) or '').strip()
+        if not cno or cno == ABOX_ADAPTER["key"] or cno in seen:
+            continue
+        seen.add(cno)
+        budget_items = {k: _num(r.get(col)) for k, col in budget_cols.items()}
+        cost_items = {k: _num(r.get(col)) for k, col in cost_cols.items()}
+        budget = _num(r.get(ABOX_ADAPTER["budget"]))
+        current_cost = round(_num(r.get(ABOX_ADAPTER["current_cost"])) or 0.0, 2)
+        warn = functions.call("F-project-cost-warning", budget=budget,
+                              current_cost=current_cost, wo_est_cost=0.0)
+        out.append({
+            'project_id': cno,
+            'contract_no': cno,
+            'name': str(r.get(ABOX_ADAPTER["name"]) or ''),
+            'budget_items': budget_items,        # 硬件集成费 / 服务预估成本 / 软件预估实施费
+            'cost_items': cost_items,            # 六分量实际
+            'budget': budget,
+            'current_cost': current_cost,
+            'budget_ratio': warn['budget_ratio'],
+            'remaining_cost': warn['remaining_cost'],
+            'cost_status': warn['status'],
+            'cost_note': warn['note'],
+        })
+    return out
 
 
 def project_cost_facts(conn: sqlite3.Connection,
