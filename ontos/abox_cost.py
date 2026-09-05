@@ -426,7 +426,92 @@ def cost_warning_portfolio(db: Union[str, sqlite3.Connection],
     }
 
 
+#: 函数 → ABox 读取层 注册表（单一真相：只有在此登记的函数才有真实实例数据可读）。
+#: 未登记的函数（毛利率 / 回款周期 / ROI …）按红线返回 ⌛未接入，绝不编演示数据。
+FUNCTION_ABOX_READERS = {
+    'F-project-cost-warning': cost_warning_portfolio,
+}
+
+
+def _function_abox_status() -> List[Dict[str, Any]]:
+    """列出所有计算函数的 ABox 可用性，供前端「函数选择器」渲染。
+
+    每个函数声明 produces_for（产出归属实体）；有读取层 → abox_available=True。
+    """
+    out: List[Dict[str, Any]] = []
+    for fid in functions.ids():
+        fn = functions.get(fid)
+        if not fn:
+            continue
+        produces = getattr(fn, 'produces_for', None) or []
+        out.append({
+            'id': fid,
+            'name': getattr(fn, 'name', fid),
+            'category': getattr(fn, 'category', ''),
+            'produces_for': list(produces),
+            'entity': produces[0] if produces else None,
+            'abox_available': fid in FUNCTION_ABOX_READERS,
+        })
+    return out
+
+
+def function_abox_view(db: Union[str, sqlite3.Connection],
+                       function_id: str) -> Dict[str, Any]:
+    """某函数的 ABox 实例视图：读该函数作用的实体实例 → 逐条调本体函数 → 返回判定。
+
+    - 有读取层（如 F-project-cost-warning）→ 跑全量实例，返回逐条 output + 分布。
+    - 无读取层 → 按红线返回 available=False + 原因（不编数据）。
+    """
+    own = False
+    if isinstance(db, sqlite3.Connection):
+        conn = db
+    else:
+        conn = sqlite3.connect(db)
+        own = True
+    try:
+        fn = functions.get(function_id)
+        if not fn:
+            return {'available': False, 'function': function_id,
+                    'error': 'unknown_function', 'rows': []}
+        produces = getattr(fn, 'produces_for', None) or []
+        entity = produces[0] if produces else None
+        reader = FUNCTION_ABOX_READERS.get(function_id)
+        if not reader:
+            return {
+                'available': False,
+                'function': function_id,
+                'name': getattr(fn, 'name', function_id),
+                'entity': entity,
+                'reason': ('%s 的 ABox 读取层尚未接入（当前真实实例数据仅来自 md_contract，'
+                           '仅成本预警类函数可用）。数据源接入后自动可用，不返回演示数据。'
+                           % function_id),
+                'rows': [],
+            }
+        pf = reader(conn)
+        rows = [{
+            'key': (r.get('contract_no') or r.get('project_no')),
+            'label': (r.get('name') or r.get('contract_no') or r.get('project_no')),
+            'inputs': {'budget': r.get('budget'), 'current_cost': r.get('current_cost')},
+            'output': {k: r.get(k) for k in ('status', 'budget_ratio', 'remaining',
+                                             'estimate', 'est_cost', 'effective_cost', 'note')},
+        } for r in pf.get('rows', [])]
+        return {
+            'available': True,
+            'function': function_id,
+            'name': getattr(fn, 'name', function_id),
+            'entity': entity,
+            'total': pf.get('total'),
+            'status_count': pf.get('status_count'),
+            'summary': pf.get('summary'),
+            'rows': rows,
+        }
+    finally:
+        if own:
+            conn.close()
+
+
 def abox_report(db: Union[str, sqlite3.Connection],
+                function: Optional[str] = None,
                 sample_limit: int = 20) -> Dict[str, Any]:
     """ABox 实例概览（★本体可观测）：把 TBox 实体绑定到物理表实例，给出可观测指标。
 
@@ -509,9 +594,8 @@ def abox_report(db: Union[str, sqlite3.Connection],
                 'cost_status': warn['status'], 'budget_ratio': warn['budget_ratio'],
             })
 
-        portfolio = cost_warning_portfolio(conn)
         not_avail = ABOX_ADAPTER.get('not_available') or {}
-        return {
+        result = {
             'success': True,
             'source': 'ontos.abox_cost.abox_report',
             'db': {
@@ -526,12 +610,12 @@ def abox_report(db: Union[str, sqlite3.Connection],
             'sample': sample,
             'sample_limit': sample_limit,
             'not_available': [{'domain': k, 'reason': v} for k, v in not_avail.items()],
-            'cost_portfolio': {
-                'total': portfolio['total'],
-                'summary': portfolio['summary'],
-                'status_count': portfolio['status_count'],
-            },
+            # 函数选择器数据源：列出所有计算函数及其 ABox 可用性（驱动下方函数视图）
+            'functions': _function_abox_status(),
         }
+        if function:
+            result['function_view'] = function_abox_view(conn, function)
+        return result
     finally:
         if own:
             conn.close()
