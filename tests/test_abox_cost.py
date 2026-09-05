@@ -185,6 +185,68 @@ def test_project_cost_detail(profile_db):
     assert r['cost_status'] == '超支'
 
 
+# ── 防误判：limit 截断时 total / status_count 必须基于全量 ──────────
+
+
+@pytest.fixture
+def many_db(tmp_path):
+    """12 个项目：2 超支 / 1 预警 / 9 正常 + 1 行表头脏数据"""
+    p = str(tmp_path / "many.db")
+    conn = sqlite3.connect(p)
+    conn.execute('CREATE TABLE md_contract ("%s" TEXT, "%s" TEXT, "%s" REAL, "%s" REAL)' % (
+        AB["key"], AB["name"], AB["budget"], AB["current_cost"]))
+    conn.execute('INSERT INTO md_contract VALUES (?,?,?,?)', ('合同编号', '脏表头', 1, 1))
+    for i in range(9):
+        conn.execute('INSERT INTO md_contract VALUES (?,?,?,?)',
+                     (f'N{i:03d}', f'正常项目{i}', 100000, 10000))
+    conn.execute('INSERT INTO md_contract VALUES (?,?,?,?)', ('W001', '预警项目', 100000, 95000))
+    conn.execute('INSERT INTO md_contract VALUES (?,?,?,?)', ('O001', '超支项目A', 100000, 120000))
+    conn.execute('INSERT INTO md_contract VALUES (?,?,?,?)', ('O002', '超支项目B', 100000, 150000))
+    conn.commit()
+    conn.close()
+    return p
+
+
+def test_portfolio_total_not_truncated_by_limit(many_db):
+    """★回归：limit 只截断条目，total / status_count 必须仍是全量（12 个）"""
+    r = abox_cost.project_portfolio(many_db, limit=5)
+    assert r['returned'] == 5
+    assert r['total'] == 12 and r['total_all'] == 12      # 脏行已剔除
+    assert r['truncated'] is True
+    assert r['next_offset'] == 5
+    # 全库分布，而非本页分布
+    assert r['status_count'] == {'正常': 9, '预警': 1, '超支': 2}
+
+
+def test_portfolio_status_filter(many_db):
+    """按本体判定值筛选：全部超支项目（统计不受 limit 影响）"""
+    r = abox_cost.project_portfolio(many_db, status='超支', limit=1)
+    assert r['total'] == 2 and r['total_all'] == 12
+    assert r['returned'] == 1
+    assert r['items'][0]['cost_status'] == '超支'
+    assert r['truncated'] is True
+    assert len(abox_cost.project_portfolio(many_db, status='超支', limit=None)['items']) == 2
+
+
+def test_portfolio_pagination_walks_all(many_db):
+    """翻页可遍历全集，且最后一页 truncated=False"""
+    seen, off, pages = [], 0, 0
+    while True:
+        r = abox_cost.project_portfolio(many_db, limit=5, offset=off)
+        seen += [x['contract_no'] for x in r['items']]
+        pages += 1
+        if not r['truncated'] or pages > 10:
+            break
+        off = r['next_offset']
+    assert len(seen) == 12 and len(set(seen)) == 12
+
+
+def test_cost_detail_page_meta(many_db):
+    r = abox_cost.project_cost_detail_page(many_db, limit=3)
+    assert r['total'] == 12 and r['returned'] == 3 and r['truncated'] is True
+    assert abox_cost.project_cost_detail(many_db, limit=3)[0]['contract_no'] == 'N000'
+
+
 def test_not_available_no_fake_data():
     """★红线：未接入的数据域必须显式声明未接入，不得返回演示/估算数据"""
     r = abox_cost.not_available('workhour')

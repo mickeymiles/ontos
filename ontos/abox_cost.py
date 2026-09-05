@@ -85,6 +85,35 @@ def not_available(domain: str) -> Dict[str, Any]:
     }
 
 
+def _profile_columns() -> List[str]:
+    """项目档案 + 预算/成本 的物理列清单（取 abox_adapter 声明）。"""
+    prof = ABOX_ADAPTER.get("profile") or {}
+    cols = [ABOX_ADAPTER["key"], ABOX_ADAPTER["budget"], ABOX_ADAPTER["current_cost"]]
+    cols += [c for c in prof.values() if isinstance(c, str)]
+    return cols
+
+
+def _load_project_rows(db: Union[str, sqlite3.Connection],
+                       contract_no: Optional[str] = None) -> List[Dict[str, Any]]:
+    """读 md_contract 项目行（去重、跳过脏行），返回【全量】行。
+
+    ★不在此处 limit：调用方需要基于全量统计（总数/预警分布），
+      截断只影响最终返回条数，绝不污染 total 与 status_count。
+    """
+    own = False
+    if isinstance(db, sqlite3.Connection):
+        conn = db
+    else:
+        conn = sqlite3.connect(db)
+        own = True
+    try:
+        return _query_rows(conn, ABOX_ADAPTER["table"], _profile_columns(),
+                           where_col=ABOX_ADAPTER["key"], where_val=contract_no)
+    finally:
+        if own:
+            conn.close()
+
+
 def project_facts(db: Union[str, sqlite3.Connection],
                   contract_no: Optional[str] = None,
                   limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -93,24 +122,13 @@ def project_facts(db: Union[str, sqlite3.Connection],
     智能体（项目管理专家）的「项目画像」数据源：读 md_contract 档案列（部门/责任人/
     区域/合同状态/签约额…）+ 预算/成本加工列，再逐项目调 F-project-cost-warning。
     返回字段名兼顾智能体既有工具契约：project_id = 合同编号（源表无独立项目号列）。
+
+    ⚠ 需要「总数 / 是否截断 / 全量预警分布」请用 project_portfolio：
+       本函数只返回列表，调用方无法区分「样本」与「全集」（曾导致智能体把
+       前 19 条当成全部 629 个项目作答）。
     """
     prof = ABOX_ADAPTER.get("profile") or {}
-    wanted = [ABOX_ADAPTER["key"], ABOX_ADAPTER["budget"], ABOX_ADAPTER["current_cost"]]
-    wanted += [c for c in prof.values() if isinstance(c, str)]
-
-    own = False
-    if isinstance(db, sqlite3.Connection):
-        conn = db
-    else:
-        conn = sqlite3.connect(db)
-        own = True
-    try:
-        rows = _query_rows(conn, ABOX_ADAPTER["table"], wanted,
-                           where_col=ABOX_ADAPTER["key"], where_val=contract_no,
-                           limit=limit)
-    finally:
-        if own:
-            conn.close()
+    rows = _load_project_rows(db, contract_no=contract_no)
 
     out: List[Dict[str, Any]] = []
     seen = set()
@@ -147,7 +165,53 @@ def project_facts(db: Union[str, sqlite3.Connection],
                           'blocked_by': (ABOX_ADAPTER.get('not_available') or {}).get(
                               'four_calc', '四算审批流数据未接入')},
         })
-    return out
+    return out[:limit] if limit else out
+
+
+def project_portfolio(db: Union[str, sqlite3.Connection],
+                      contract_no: Optional[str] = None,
+                      status: Optional[str] = None,
+                      limit: Optional[int] = 20,
+                      offset: int = 0) -> Dict[str, Any]:
+    """项目组合查询（★推荐入口）：返回条目 + **全库总数/截断标记/全量预警分布**。
+
+    ★设计要点（2026-09-05 事故修复）：必须区分「样本」与「全集」。此前工具只返回
+      limit 截断后的条目，智能体据此回答「共 19 个项目、其中 3 个超支」——
+      实际全库 629 个项目、68 个超支，结论严重失真。
+      故本函数：total / status_count 一律基于**全量**计算，truncated 明确告知是否截断，
+      并给出翻页提示（offset）。
+
+    status : '正常' / '预警' / '超支'（本体 F-project-cost-warning 判定值）筛选。
+    limit  : 返回条数（None 表示不限）。offset：偏移量，用于翻页遍历。
+    返回  : {'items', 'total'(筛选后全量), 'total_all'(全库), 'returned',
+             'offset', 'truncated', 'next_offset', 'status_count'(全库分布)}
+    """
+    items = project_facts(db, contract_no=contract_no)         # 全量（不截断）
+    total_all = len(items)
+    status_count_all: Dict[str, int] = {}
+    for it in items:
+        s = it.get('cost_status')
+        status_count_all[s] = status_count_all.get(s, 0) + 1
+
+    if status:
+        items = [x for x in items if x.get('cost_status') == status]
+    total = len(items)
+
+    page = items[offset:]
+    if limit:
+        page = page[:limit]
+    truncated = (offset + len(page)) < total
+    return {
+        'items': page,
+        'total': total,                    # 筛选后的全量条数
+        'total_all': total_all,            # 全库条数（不受筛选影响）
+        'returned': len(page),             # 本次实际返回条数
+        'offset': offset,
+        'truncated': truncated,
+        'next_offset': (offset + len(page)) if truncated else None,
+        'status_count': status_count_all,  # ★全库分布（非本页分布）
+        'filter': {'contract_no': contract_no, 'status': status},
+    }
 
 
 def project_cost_detail(db: Union[str, sqlite3.Connection],
@@ -156,7 +220,17 @@ def project_cost_detail(db: Union[str, sqlite3.Connection],
     """成本明细：预算三分量 / 成本六分量 + 合计 + 本体预警（★与 9006 同源）。
 
     分量列名取 COST_FORMULA_POLICY 的 budget.columns / cost.columns（单一真相）。
+
+    ⚠ limit 只截断返回条目；需要「总数/是否截断」请用 project_cost_detail_page。
     """
+    return project_cost_detail_page(db, contract_no=contract_no, limit=limit)['items']
+
+
+def project_cost_detail_page(db: Union[str, sqlite3.Connection],
+                             contract_no: Optional[str] = None,
+                             limit: Optional[int] = 20,
+                             offset: int = 0) -> Dict[str, Any]:
+    """成本明细（带 total/truncated 元信息）——同 project_portfolio 的防误判设计。"""
     budget_cols = COST_FORMULA_POLICY["budget"]["columns"]
     cost_cols = COST_FORMULA_POLICY["cost"]["columns"]
     wanted = [ABOX_ADAPTER["key"], ABOX_ADAPTER["name"],
@@ -171,8 +245,7 @@ def project_cost_detail(db: Union[str, sqlite3.Connection],
         own = True
     try:
         rows = _query_rows(conn, ABOX_ADAPTER["table"], wanted,
-                           where_col=ABOX_ADAPTER["key"], where_val=contract_no,
-                           limit=limit)
+                           where_col=ABOX_ADAPTER["key"], where_val=contract_no)
     finally:
         if own:
             conn.close()
@@ -203,7 +276,19 @@ def project_cost_detail(db: Union[str, sqlite3.Connection],
             'cost_status': warn['status'],
             'cost_note': warn['note'],
         })
-    return out
+    total = len(out)
+    page = out[offset:]
+    if limit:
+        page = page[:limit]
+    truncated = (offset + len(page)) < total
+    return {
+        'items': page,
+        'total': total,
+        'returned': len(page),
+        'offset': offset,
+        'truncated': truncated,
+        'next_offset': (offset + len(page)) if truncated else None,
+    }
 
 
 def project_cost_facts(conn: sqlite3.Connection,
