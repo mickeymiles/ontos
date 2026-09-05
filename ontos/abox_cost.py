@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from typing import Any, Dict, List, Optional, Union
 
@@ -423,3 +424,114 @@ def cost_warning_portfolio(db: Union[str, sqlite3.Connection],
         },
         'rows': details,
     }
+
+
+def abox_report(db: Union[str, sqlite3.Connection],
+                sample_limit: int = 20) -> Dict[str, Any]:
+    """ABox 实例概览（★本体可观测）：把 TBox 实体绑定到物理表实例，给出可观测指标。
+
+    回答「看得到 TBox 但看不到 ABox」：渲染
+    1) 库/表状态（文件在否、表在否、原始行数、去重实例数）
+    2) abox_adapter 绑定映射（本体属性→物理列，标存在性+非空率）—— 单一真相可视化
+    3) 实体实例概览（样本实例 + 本体成本预警判定）
+    4) 未接入数据域（⌛not_available）
+    5) 成本预警分布（本体对全量 ABox 的判定结果）
+
+    纯读、无副作用；表不存在/库缺失时优雅返回 status(空) 而非 500。
+    9006 本体页 /api/ontos/abox 与 9007 智能体共用同一份实现（同源）。
+    """
+    own = False
+    if isinstance(db, sqlite3.Connection):
+        conn = db
+    else:
+        conn = sqlite3.connect(db)
+        own = True
+    try:
+        table = ABOX_ADAPTER["table"]
+        cols = _available_columns(conn, table)
+        table_exists = len(cols) > 0
+        raw_count = 0
+        if table_exists:
+            raw_count = conn.execute('SELECT COUNT(*) FROM "%s"' % table).fetchone()[0]
+        # 去重实例（与 project_facts 口径一致：跳过表头/空/重复）
+        instances = _load_project_rows(conn)
+        instance_count = len(instances)
+
+        def _col_stat(col: str) -> Dict[str, Any]:
+            exists = col in cols
+            non_null = 0
+            if exists:
+                non_null = conn.execute(
+                    'SELECT COUNT(*) FROM "%s" WHERE "%s" IS NOT NULL AND "%s" != \'\''
+                    % (table, col, col)).fetchone()[0]
+            return {'col': col, 'exists': exists, 'non_null': non_null,
+                    'non_null_rate': (round(non_null / raw_count, 4) if raw_count else 0.0)}
+
+        bindings: List[Dict[str, Any]] = []
+        for prop, key in (('key', 'key'), ('name', 'name'), ('budget', 'budget'),
+                          ('current_cost', 'current_cost'), ('project_no', 'project_no')):
+            c = ABOX_ADAPTER.get(key)
+            if c:
+                s = _col_stat(c)
+                s['property'] = prop
+                bindings.append(s)
+        for fld, c in (ABOX_ADAPTER.get('profile') or {}).items():
+            s = _col_stat(c)
+            s['property'] = 'profile.' + fld
+            bindings.append(s)
+        for fld, c in COST_FORMULA_POLICY["budget"]["columns"].items():
+            s = _col_stat(c)
+            s['property'] = 'budget.' + fld
+            bindings.append(s)
+        for fld, c in COST_FORMULA_POLICY["cost"]["columns"].items():
+            s = _col_stat(c)
+            s['property'] = 'cost.' + fld
+            bindings.append(s)
+
+        # 样本实例（含本体成本预警判定）
+        prof = ABOX_ADAPTER.get('profile') or {}
+        sample: List[Dict[str, Any]] = []
+        for r in instances[:sample_limit]:
+            cno = str(r.get(ABOX_ADAPTER["key"]) or '')
+            budget = _num(r.get(ABOX_ADAPTER["budget"]))
+            current = round(_num(r.get(ABOX_ADAPTER["current_cost"])) or 0.0, 2)
+            warn = functions.call("F-project-cost-warning", budget=budget,
+                                  current_cost=current, wo_est_cost=0.0)
+            sample.append({
+                'contract_no': cno,
+                'name': str(r.get(prof.get('name', '') or '') or ''),
+                'dept': r.get(prof.get('dept', '') or '') or '',
+                'owner': r.get(prof.get('owner', '') or '') or '',
+                'region': r.get(prof.get('region', '') or '') or '',
+                'status': r.get(prof.get('status', '') or '') or '',
+                'amount': _num(r.get(prof.get('amount', '') or '')),
+                'budget': budget, 'current_cost': current,
+                'cost_status': warn['status'], 'budget_ratio': warn['budget_ratio'],
+            })
+
+        portfolio = cost_warning_portfolio(conn)
+        not_avail = ABOX_ADAPTER.get('not_available') or {}
+        return {
+            'success': True,
+            'source': 'ontos.abox_cost.abox_report',
+            'db': {
+                'path': db if isinstance(db, str) else '(connection)',
+                'file_exists': (isinstance(db, str) and os.path.exists(db)),
+                'table': table,
+                'table_exists': table_exists,
+                'raw_row_count': raw_count,
+                'instance_count': instance_count,
+            },
+            'bindings': bindings,
+            'sample': sample,
+            'sample_limit': sample_limit,
+            'not_available': [{'domain': k, 'reason': v} for k, v in not_avail.items()],
+            'cost_portfolio': {
+                'total': portfolio['total'],
+                'summary': portfolio['summary'],
+                'status_count': portfolio['status_count'],
+            },
+        }
+    finally:
+        if own:
+            conn.close()
