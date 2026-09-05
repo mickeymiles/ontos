@@ -510,18 +510,70 @@ def function_abox_view(db: Union[str, sqlite3.Connection],
             conn.close()
 
 
+def _list_tables(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """枚举业务库内全部数据表（不含 sqlite 内部表）：表名 / 行数 / 列数列表。
+
+    用于 ABox 可观测：回答「库里到底有哪些表」，而非只盯 abox_adapter 声明的主表。
+    """
+    try:
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            " ORDER BY name").fetchall()]
+    except sqlite3.Error:
+        return []
+    out: List[Dict[str, Any]] = []
+    for t in names:
+        try:
+            rc = conn.execute('SELECT COUNT(*) FROM "%s"' % t).fetchone()[0]
+        except sqlite3.Error:
+            rc = 0
+        cols = sorted(_available_columns(conn, t))
+        out.append({'name': t, 'row_count': rc, 'column_count': len(cols), 'columns': cols})
+    return out
+
+
+def _base_sample(conn: sqlite3.Connection, table: str, limit: int) -> List[Dict[str, Any]]:
+    """中性基底实例样本：仅取 abox_adapter 已映射的原始字段，**不含任何函数派生输出**。
+
+    与 project_facts/cost_warning_portfolio 的区别：这里不调本体函数、不附 cost_status，
+    纯粹呈现「ABox 基底个体长什么样」，避免把某一函数的派生结果固化进 ABox 总览。
+    """
+    prof = ABOX_ADAPTER.get('profile') or {}
+    wanted = [ABOX_ADAPTER.get('key', ''), ABOX_ADAPTER.get('name', ''),
+              ABOX_ADAPTER.get('budget', ''), ABOX_ADAPTER.get('current_cost', '')]
+    wanted += [prof.get(k, '') for k in ('dept', 'owner', 'region', 'status', 'amount')]
+    wanted = [w for w in wanted if w]
+    rows = _query_rows(conn, table, wanted, limit=limit)
+    key_c = ABOX_ADAPTER.get('key', '')
+    name_c = ABOX_ADAPTER.get('name', '') or ''
+    bud_c = ABOX_ADAPTER.get('budget', '')
+    cur_c = ABOX_ADAPTER.get('current_cost', '')
+    return [{
+        'contract_no': str(r.get(key_c) or ''),
+        'name': str(r.get(name_c) or ''),
+        'dept': r.get(prof.get('dept', '') or '') or '',
+        'owner': r.get(prof.get('owner', '') or '') or '',
+        'region': r.get(prof.get('region', '') or '') or '',
+        'status': r.get(prof.get('status', '') or '') or '',
+        'amount': _num(r.get(prof.get('amount', '') or '')),
+        'budget': _num(r.get(bud_c)),
+        'current_cost': round(_num(r.get(cur_c)) or 0.0, 2),
+    } for r in rows]
+
+
 def abox_report(db: Union[str, sqlite3.Connection],
                 function: Optional[str] = None,
                 sample_limit: int = 20) -> Dict[str, Any]:
     """ABox 实例概览（★本体可观测）：把 TBox 实体绑定到物理表实例，给出可观测指标。
 
-    回答「看得到 TBox 但看不到 ABox」：渲染
-    1) 库/表状态（文件在否、表在否、原始行数、去重实例数）
-    2) abox_adapter 绑定映射（本体属性→物理列，标存在性+非空率）—— 单一真相可视化
-    3) 实体实例概览（样本实例 + 本体成本预警判定）
-    4) 未接入数据域（⌛not_available）
-    5) 成本预警分布（本体对全量 ABox 的判定结果）
+    回答「看得到 TBox 但看不到 ABox」——渲染**实例基座**（基底个体，独立于任何函数）：
+    1) 全部数据表枚举（库里有哪些表、各自行数/列数）—— 不再只盯 abox_adapter 主表
+    2) abox_adapter 绑定映射（本体属性→物理表.列，标存在性+非空率，按实体归属）—— 单一真相可视化
+    3) 实体→字段映射浏览器所需数据（tables + bindings.entity）
+    4) 中性基底实例样本（仅原始映射字段，**不含函数派生**）
+    5) 未接入数据域（⌛not_available）
 
+    ※ 函数派生结果（如成本预警判定）**不属于**本总览，改由 TBox 点函数「运行/预览」弹窗查看。
     纯读、无副作用；表不存在/库缺失时优雅返回 status(空) 而非 500。
     9006 本体页 /api/ontos/abox 与 9007 智能体共用同一份实现（同源）。
     """
@@ -552,47 +604,29 @@ def abox_report(db: Union[str, sqlite3.Connection],
             return {'col': col, 'exists': exists, 'non_null': non_null,
                     'non_null_rate': (round(non_null / raw_count, 4) if raw_count else 0.0)}
 
+        # abox_adapter 绑定映射（单一真相可视化）：当前仅 Project（成本）实体有物理绑定
         bindings: List[Dict[str, Any]] = []
-        for prop, key in (('key', 'key'), ('name', 'name'), ('budget', 'budget'),
-                          ('current_cost', 'current_cost'), ('project_no', 'project_no')):
-            c = ABOX_ADAPTER.get(key)
-            if c:
-                s = _col_stat(c)
-                s['property'] = prop
-                bindings.append(s)
+        def _add_binding(prop: str, col: str, entity: str = 'Project') -> None:
+            if not col:
+                return
+            s = _col_stat(col)
+            s['property'] = prop
+            s['entity'] = entity
+            bindings.append(s)
+        _add_binding('key', ABOX_ADAPTER.get('key'))
+        _add_binding('name', ABOX_ADAPTER.get('name'))
+        _add_binding('budget', ABOX_ADAPTER.get('budget'))
+        _add_binding('current_cost', ABOX_ADAPTER.get('current_cost'))
+        _add_binding('project_no', ABOX_ADAPTER.get('project_no'))
         for fld, c in (ABOX_ADAPTER.get('profile') or {}).items():
-            s = _col_stat(c)
-            s['property'] = 'profile.' + fld
-            bindings.append(s)
+            _add_binding('profile.' + fld, c)
         for fld, c in COST_FORMULA_POLICY["budget"]["columns"].items():
-            s = _col_stat(c)
-            s['property'] = 'budget.' + fld
-            bindings.append(s)
+            _add_binding('budget.' + fld, c)
         for fld, c in COST_FORMULA_POLICY["cost"]["columns"].items():
-            s = _col_stat(c)
-            s['property'] = 'cost.' + fld
-            bindings.append(s)
+            _add_binding('cost.' + fld, c)
 
-        # 样本实例（含本体成本预警判定）
-        prof = ABOX_ADAPTER.get('profile') or {}
-        sample: List[Dict[str, Any]] = []
-        for r in instances[:sample_limit]:
-            cno = str(r.get(ABOX_ADAPTER["key"]) or '')
-            budget = _num(r.get(ABOX_ADAPTER["budget"]))
-            current = round(_num(r.get(ABOX_ADAPTER["current_cost"])) or 0.0, 2)
-            warn = functions.call("F-project-cost-warning", budget=budget,
-                                  current_cost=current, wo_est_cost=0.0)
-            sample.append({
-                'contract_no': cno,
-                'name': str(r.get(prof.get('name', '') or '') or ''),
-                'dept': r.get(prof.get('dept', '') or '') or '',
-                'owner': r.get(prof.get('owner', '') or '') or '',
-                'region': r.get(prof.get('region', '') or '') or '',
-                'status': r.get(prof.get('status', '') or '') or '',
-                'amount': _num(r.get(prof.get('amount', '') or '')),
-                'budget': budget, 'current_cost': current,
-                'cost_status': warn['status'], 'budget_ratio': warn['budget_ratio'],
-            })
+        # 中性基底实例样本（仅原始映射字段，不含任何函数派生输出）
+        base_sample: List[Dict[str, Any]] = _base_sample(conn, table, sample_limit)
 
         not_avail = ABOX_ADAPTER.get('not_available') or {}
         result = {
@@ -606,11 +640,12 @@ def abox_report(db: Union[str, sqlite3.Connection],
                 'raw_row_count': raw_count,
                 'instance_count': instance_count,
             },
+            'tables': _list_tables(conn),
             'bindings': bindings,
-            'sample': sample,
-            'sample_limit': sample_limit,
+            'base_sample': base_sample,
+            'base_sample_limit': sample_limit,
             'not_available': [{'domain': k, 'reason': v} for k, v in not_avail.items()],
-            # 函数选择器数据源：列出所有计算函数及其 ABox 可用性（驱动下方函数视图）
+            # 函数选择器数据源：列出所有计算函数及其 ABox 可用性（驱动 TBox 函数运行弹窗）
             'functions': _function_abox_status(),
         }
         if function:
