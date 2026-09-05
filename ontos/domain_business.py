@@ -102,8 +102,10 @@ ENTITIES: Dict[str, Entity] = {
              "md_contract】（总合同表 v2，205 列，中文列名）映射；四算/PMO 相关属性标 ⌛预留，"
              "后期数据补齐后只改 source 即可切源（见 RESERVED_FIELDS）。",
         attributes=[
-            Attribute("project_no", "string", True, True, 'md_contract."部门内部项目号"',
-                      "项目编号（总合同表 v2 中文列；裁剪表 core_project.project_no）"),
+            Attribute("project_no", "string", True, True,
+                      'core_project.project_no（md_contract 无独立项目号列，缺省=合同编号，1:1）',
+                      "项目编号（★md_contract 205 列实测无「部门内部项目号」列——此前 source 标注有误；"
+                      "实际由裁剪表 core_project.project_no 提供，upsert 缺省取合同编号）"),
             Attribute("name", "string", True, False, 'md_contract."项目描述"',
                       "项目名称（总合同表 v2 中文列）"),
             Attribute("contract_no", "string", False, False, 'md_contract."合同编号"',
@@ -580,6 +582,17 @@ COST_FORMULA_POLICY: Dict[str, Any] = {
                 "收付款明细 finance_detail 虽有数据(12700行)但属**资金口径**而非成本口径，暂不采用。",
     },
     "current_remaining": "预算 − 成本 − 工单预估成本(Σ工单 人员/差旅/灵活用工/变动)",
+    # ★ABox 适配层物理列绑定（ontos/abox_cost.py 的取数单一真相；切源只改本块，
+    #   适配层代码不另行硬编码列名）。9006 固化页面与 9007 智能体同走 abox_cost，
+    #   任何一侧不得绕开本层自建取数 SQL（2026-09-05 用户拍板：同源）。
+    "abox_adapter": {
+        "table": "md_contract",
+        "key": "合同编号",                    # 唯一标识列（实测唯一可用标识，distinct=629）
+        "name": "项目描述",                   # 项目名称列（总合同表 v2 无「项目名称」列）
+        "budget": "累计实施成本预估",         # ≡ 上方 budget 三分量之和（impl_source）
+        "current_cost": "累计实施成本实际",   # ≡ 上方 cost 六分量之和（impl_source）
+        "project_no": "",                     # 空 = 源表无独立项目号列，缺省取 key（合同:项目=1:1）
+    },
     "out_of_scope_columns": ["软件项目分包预估成本", "软件协力分包预估/实际成本", "服务协力分包预估/实际成本",
                             "往年/当年实际培训费用", "大区/事业部项目直接/间接成本"],
     "source_function": "F-project-budget / F-project-cost / F-project-current-remaining",
