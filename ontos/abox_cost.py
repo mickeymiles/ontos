@@ -130,6 +130,7 @@ def project_facts(db: Union[str, sqlite3.Connection],
     """
     prof = ABOX_ADAPTER.get("profile") or {}
     rows = _load_project_rows(db, contract_no=contract_no)
+    rollup = workorder_cost_by_project(db)    # 按项目工单预估（补滞后口径）
 
     out: List[Dict[str, Any]] = []
     seen = set()
@@ -140,8 +141,9 @@ def project_facts(db: Union[str, sqlite3.Connection],
         seen.add(cno)
         budget = _num(r.get(ABOX_ADAPTER["budget"]))
         current_cost = round(_num(r.get(ABOX_ADAPTER["current_cost"])) or 0.0, 2)
+        woe = float(rollup.get(cno, 0.0) or 0.0)
         warn = functions.call("F-project-cost-warning", budget=budget,
-                              current_cost=current_cost, wo_est_cost=0.0)
+                              current_cost=current_cost, wo_est_cost=woe)
         out.append({
             'project_id': cno,                 # 兼容智能体工具契约（= 合同编号）
             'contract_no': cno,
@@ -157,6 +159,7 @@ def project_facts(db: Union[str, sqlite3.Connection],
             'industry': r.get(prof.get('industry', '') or '') or '',
             'budget': budget,
             'current_cost': current_cost,
+            'est_cost': woe,                         # PMO 工单预估（F-workorder-cost-rollup，2026-09-06 接入）
             'budget_ratio': warn['budget_ratio'],
             'remaining_cost': warn['remaining_cost'],
             'cost_status': warn['status'],           # 正常 / 预警 / 超支（本体判定）
@@ -247,6 +250,7 @@ def project_cost_detail_page(db: Union[str, sqlite3.Connection],
     try:
         rows = _query_rows(conn, ABOX_ADAPTER["table"], wanted,
                            where_col=ABOX_ADAPTER["key"], where_val=contract_no)
+        rollup = workorder_cost_by_project(conn)    # 按项目工单预估（补滞后口径）
     finally:
         if own:
             conn.close()
@@ -262,8 +266,9 @@ def project_cost_detail_page(db: Union[str, sqlite3.Connection],
         cost_items = {k: _num(r.get(col)) for k, col in cost_cols.items()}
         budget = _num(r.get(ABOX_ADAPTER["budget"]))
         current_cost = round(_num(r.get(ABOX_ADAPTER["current_cost"])) or 0.0, 2)
+        woe = float(rollup.get(cno, 0.0) or 0.0)
         warn = functions.call("F-project-cost-warning", budget=budget,
-                              current_cost=current_cost, wo_est_cost=0.0)
+                              current_cost=current_cost, wo_est_cost=woe)
         out.append({
             'project_id': cno,
             'contract_no': cno,
@@ -272,6 +277,7 @@ def project_cost_detail_page(db: Union[str, sqlite3.Connection],
             'cost_items': cost_items,            # 六分量实际
             'budget': budget,
             'current_cost': current_cost,
+            'est_cost': woe,                         # PMO 工单预估（F-workorder-cost-rollup，2026-09-06 接入）
             'budget_ratio': warn['budget_ratio'],
             'remaining_cost': warn['remaining_cost'],
             'cost_status': warn['status'],
@@ -364,6 +370,7 @@ def cost_warning_portfolio(db: Union[str, sqlite3.Connection],
         own = True
     try:
         facts = project_cost_facts(conn, contract_no=contract_no)
+        rollup = workorder_cost_by_project(conn)   # 按项目工单预估（补主数据滞后口径）
     finally:
         if own:
             conn.close()
@@ -376,12 +383,13 @@ def cost_warning_portfolio(db: Union[str, sqlite3.Connection],
         current_cost = round(f['current_cost'] or 0.0, 2)
         if budget is None and current_cost <= 0:
             continue
+        woe = float(rollup.get(f['project_no'], 0.0) or 0.0)
         # ★判定统一走本体 F-project-cost-warning（与纯函数/智能体同一份算法）
         res = functions.call(
             "F-project-cost-warning",
             budget=budget,
             current_cost=current_cost,
-            wo_est_cost=0.0,          # 工单预估聚合源未落地（RESERVED_FIELDS），接入后此处改读
+            wo_est_cost=woe,          # PMO 工单预估（F-workorder-cost-rollup 汇总，2026-09-06 接入）
         )
         woe = float(res.get('wo_est_cost') or 0.0)
         status_count[res['status']] = status_count.get(res['status'], 0) + 1
@@ -426,10 +434,62 @@ def cost_warning_portfolio(db: Union[str, sqlite3.Connection],
     }
 
 
+def workorder_cost_by_project(db: Union[str, sqlite3.Connection]) -> Dict[str, float]:
+    """读 plm_workorder → 按 project_no 汇总工单预估成本（Σ 自主+差旅+变动）。
+
+    供成本预警把「预估成本」从恒 0 修正为真实 PMO 工单预估（补主数据滞后口径）。
+    表/列不存在 → 返回空字典（调用方按 0 处理，退化为滞后口径，不报错）。
+    列名取 COST_FORMULA_POLICY.abox_adapter.workorder（单一真相），切源只改声明块。
+    """
+    wo = COST_FORMULA_POLICY["abox_adapter"].get("workorder")
+    if not wo:
+        return {}
+    own = False
+    if isinstance(db, sqlite3.Connection):
+        conn = db
+    else:
+        conn = sqlite3.connect(db)
+        own = True
+    try:
+        table = wo["table"]
+        cols = _available_columns(conn, table)
+        req = ["project_no", "self_cost", "travel_cost", "variable_cost"]
+        if not all(c in cols for c in req):
+            return {}
+        sql = ('SELECT "%s", COALESCE("%s",0)+COALESCE("%s",0)+COALESCE("%s",0) '
+               'FROM "%s" WHERE "%s" IS NOT NULL AND "%s" != \'\''
+               % (wo["project_no"], wo["self_cost"], wo["travel_cost"], wo["variable_cost"],
+                  table, wo["project_no"], wo["project_no"]))
+        out: Dict[str, float] = {}
+        for pn, tot in conn.execute(sql).fetchall():
+            pk = str(pn)
+            out[pk] = round(out.get(pk, 0.0) + float(tot or 0.0), 2)
+        return out
+    except sqlite3.Error:
+        return {}
+    finally:
+        if own:
+            conn.close()
+
+
+def workorder_cost_portfolio(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """F-workorder-cost-rollup 的 ABox 读取层：按项目汇总工单预估成本（供本体页函数运行弹窗）。"""
+    rollup = workorder_cost_by_project(conn)
+    rows = [{'project_no': pn, 'wo_est_cost': v} for pn, v in rollup.items()]
+    total = round(sum(rollup.values()), 2)
+    return {
+        'total': len(rows),
+        'status_count': {},
+        'summary': {'项目数': '%d 个' % len(rows), '预估成本合计': '¥%s' % format(round(total), ',')},
+        'rows': rows,
+    }
+
+
 #: 函数 → ABox 读取层 注册表（单一真相：只有在此登记的函数才有真实实例数据可读）。
 #: 未登记的函数（毛利率 / 回款周期 / ROI …）按红线返回 ⌛未接入，绝不编演示数据。
 FUNCTION_ABOX_READERS = {
     'F-project-cost-warning': cost_warning_portfolio,
+    'F-workorder-cost-rollup': workorder_cost_portfolio,
 }
 
 

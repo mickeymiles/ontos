@@ -134,10 +134,11 @@ ENTITIES: Dict[str, Entity] = {
                       ' ≡ core_project.accum_cost_actual',
                       "当前成本（≡ 累计实施成本实际，已实测等价，滞后约1月；"
                       "后期权威源=F-cost-rollup(Σ付款+Σ成本明细行) 或 CostBaseline(核算)）"),
-            Attribute("forecast_cost", "number", False, False, "",
-                      "预估成本 ⌛预留：权威源=Milestone.est_cost（PMO 里程碑成本预估，尚未建设）；"
-                      "过渡期可用 F-workorder-cost-rollup（Σ工单预估四分项）。"
-                      "★参与判定：有效成本 = 当前成本 + 预估成本（缺省0 → 退化为滞后口径）"),
+            Attribute("forecast_cost", "number", False, False,
+                      'F-workorder-cost-rollup(Σ plm_workorder.self_cost+travel_cost+variable_cost)',
+                      "预估成本（PMO 工单预估，2026-09-06 已接入）：权威源=工单三分项(自主/差旅/变动)汇总，"
+                      "由 F-workorder-cost-rollup 计算。★参与判定：有效成本 = 当前成本 + 预估成本；"
+                      "工单未录入时=0，退化为滞后口径。"),
             Attribute("start_date", "date", False, False, "", "开始日期 ⌛预留"),
             Attribute("end_date", "date", False, False, "", "结束日期 ⌛预留"),
         ],
@@ -267,16 +268,17 @@ ENTITIES: Dict[str, Entity] = {
     ),
     "WorkOrder": Entity(
         name="WorkOrder", cn="工单", kind="child", parent="Order",
-        desc="工单（订单的细化分解；明确工单内容 + 预估成本四分项。初期人员成本由项目经理预估，"
-             "后续由 Task×Person 费率替换）。",
+        desc="工单（订单的细化分解；明确工单内容 + 预估成本三分项。初期成本由项目经理预估，"
+             "后续由 Task×Person 费率替换）。★2026-09-06 物理表落地：plm_workorder（self_cost/travel_cost/variable_cost "
+             "+ complete_month 按月划分），预估成本 = Σ(自主+差旅+变动) 即 F-workorder-cost-rollup，"
+             "汇入 Project.forecast_cost 补主数据滞后口径。",
         attributes=[
             Attribute("wo_no", "string", True, True, "work_order.wo_no", "工单编号"),
             Attribute("name", "string", True, False, "work_order.name", "工单名称/内容"),
             Attribute("status", "enum", False, False, "work_order.status", "待派/执行中/已完成"),
-            Attribute("est_personnel", "number", False, False, "work_order.est_personnel", "预估人员投入成本(初期PM预估)"),
-            Attribute("est_travel", "number", False, False, "work_order.est_travel", "预估差旅投入"),
-            Attribute("est_flexible", "number", False, False, "work_order.est_flexible", "预估灵活用工投入"),
-            Attribute("est_variable", "number", False, False, "work_order.est_variable", "预估变动费用"),
+            Attribute("est_self", "number", False, False, "work_order.self_cost", "自主成本（项目经理预估的人员/实施投入）"),
+            Attribute("est_travel", "number", False, False, "work_order.travel_cost", "差旅成本（预估）"),
+            Attribute("est_variable", "number", False, False, "work_order.variable_cost", "变动费用（其他不可预见变动）"),
         ],
         relations=["hasWorkOrder_inv", "hasTask"],
     ),
@@ -601,8 +603,24 @@ COST_FORMULA_POLICY: Dict[str, Any] = {
         # ⌛未接入的数据域：这些查询**不得**用假数据兜底，必须显式返回「未接入」
         "not_available": {
             "workhour": "工时/日报：md_contract 205 列无工时列，plm_timesheet 等表为空，PMO 域未建设",
-            "task": "工单/任务：两单一物数据源未接入（plm_task / plm_assignment 为空表）",
+            "task": "任务拆解：plm_task / plm_assignment 仍为空表；工单(plm_workorder)已接入（F-workorder-cost-rollup 可用）",
             "four_calc": "四算（概算/预算/核算/决算）：审批流数据未接入，见 RESERVED_FIELDS",
+        },
+        # ── PMO 订单 / 工单 物理绑定（2026-09-06 落地：补滞后口径预估成本）──
+        # 订单/工单为手工录入（PMO 动作），不取自 datasource；project_no 当前=合同编号（md_contract，1:1），
+        # 后续切换 plm_project 项目表时只改本块 source 字符串（切源契约）。
+        "order": {
+            "table": "plm_order",
+            "order_no": "order_no", "name": "name",
+            "project_no": "project_no", "project_name": "project_name",
+            "start_date": "start_date", "end_date": "end_date",
+        },
+        "workorder": {
+            "table": "plm_workorder",
+            "wo_no": "wo_no", "name": "name", "order_no": "order_no", "order_name": "order_name",
+            "project_no": "project_no", "project_name": "project_name",
+            "self_cost": "self_cost", "travel_cost": "travel_cost",
+            "variable_cost": "variable_cost", "complete_month": "complete_month",
         },
     },
     "out_of_scope_columns": ["软件项目分包预估成本", "软件协力分包预估/实际成本", "服务协力分包预估/实际成本",
@@ -619,10 +637,10 @@ RESERVED_FIELDS: List[Dict[str, str]] = [
      "blocked_by": "四算审批流数据未接入（概算需审批通过并锁定，无历史可获取）",
      "impact": "仅展示，不参与成本预警判定（非 F-project-cost-warning 入参）"},
     {"entity": "Project", "field": "forecast_cost", "cn": "预估成本",
-     "future_source": "Milestone.est_cost（Σ未完成里程碑）",
-     "blocked_by": "PMO 域里程碑成本预估尚未建设",
-     "impact": "预警退化为滞后口径：有效成本 = 当前成本 + 0；"
-               "接入后有效成本 = 当前成本 + 预估成本，预警更及时"},
+     "future_source": "plm_workorder(Σ工单 自主/差旅/变动) 经 F-workorder-cost-rollup（2026-09-06 已接入）；"
+                      "后续可叠加 Milestone.est_cost（Σ未完成里程碑）细化",
+     "blocked_by": "已接入：工单(plm_workorder)手工录入即生效；里程碑成本预估仍待建设",
+     "impact": "预警已含预估口径：有效成本 = 当前成本 + 工单预估；工单未录入时退化为滞后口径"},
     {"entity": "Milestone", "field": "est_cost", "cn": "里程碑预估成本",
      "future_source": "md_milestone（主数据里程碑全量表）",
      "blocked_by": "PMO 域未建设，md_milestone 未导入",
@@ -994,14 +1012,14 @@ def project_cost_remaining(budget: Optional[float] = None, cost: float = 0.0) ->
 
 
 def workorder_cost_rollup(workorders: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Function F-workorder-cost-rollup 实现：工单预估成本 = Σ工单(人员+差旅+灵活用工+变动)。
+    """Function F-workorder-cost-rollup 实现：工单预估成本 = Σ工单(自主+差旅+变动)。
 
-    用于补主数据滞后缺口；初期工单人员成本由项目经理预估，后续可由 Task×Person 费率替换。
-    纯函数、无 IO。
+    用于补主数据滞后缺口；初期成本由项目经理预估，后续可由 Task×Person 费率替换。
+    纯函数、无 IO。DB 版聚合见 ontos/abox_cost.workorder_cost_by_project。
     """
     wos = workorders or []
     est = round(sum(float(wo.get(k) or 0) for wo in wos
-                   for k in ("est_personnel", "est_travel", "est_flexible", "est_variable")), 2)
+                   for k in ("est_self", "est_travel", "est_variable")), 2)
     return {"wo_est_cost": est, "count": len(wos), "source_function": "F-workorder-cost-rollup"}
 
 
@@ -1240,11 +1258,11 @@ _FUNCTION_DEFS: List[Definition] = [
     ),
     Definition(
         id="F-workorder-cost-rollup", name="工单预估成本汇总", kind="function", domain="financial", category="聚合", produces_for=['Project'],
-        description="工单预估成本 = Σ工单(人员投入+差旅+灵活用工+变动费用)；用于补主数据滞后缺口。"
-                    "初期人员成本由项目经理预估，后续可由 Task×Person 费率替换。",
+        description="工单预估成本 = Σ工单(自主成本+差旅成本+变动费用)，来自 plm_workorder；用于补主数据滞后缺口。"
+                    "2026-09-06 物理表落地，预估成本汇入 Project.forecast_cost，项目成本预警有效成本=当前成本+工单预估。",
         inputs=["workorders"], outputs=["wo_est_cost", "count", "source_function"],
-        invariant="wo_est_cost = Σ(est_personnel+est_travel+est_flexible+est_variable) and >=0",
-        version="0.1", ontology_bound=True,
+        invariant="wo_est_cost = Σ(self_cost+travel_cost+variable_cost) and >=0",
+        version="0.2", ontology_bound=True,
     ),
     Definition(
         id="F-project-current-remaining", name="当前预估剩余成本", kind="function", domain="financial", category="派生", produces_for=['Project'],
