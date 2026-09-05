@@ -40,6 +40,20 @@
     （Task×Person 费率后续替换工单预估人员成本）。
 - 范围外实体仅占位，不进主 LINKS/ENTITIES 渲染（见 OUT_OF_SCOPE_* 注释）。
 
+═══ 数据源决议（v6.2 · 2026-09-05 用户拍板，★覆盖前述所有 source）═══
+**当前唯一可用且最全的数据源 = 项目主数据表 `md_contract`（总合同表 v2，205 列，中文列名）。**
+
+- 四算审批流数据（概算/预算/核算/决算基线及其审批、调整、历史版本）**当前拿不到，也无历史可获取**
+  → 相关属性一律 ⌛预留（见 RESERVED_FIELDS），实体结构保留、source 置空，后期数据补齐再切源。
+- PMO 域里程碑成本预估尚未建设 → `Project.forecast_cost` / `Milestone.est_cost` ⌛预留；
+  成本预警退化为滞后口径（有效成本 = 当前成本 + 0）。
+- 收付款明细（finance_detail / md_payment）未导入 → **暂不走 F-cost-rollup**，
+  当前成本改取主数据「累计实施成本实际」。
+- 预算取主数据三项之和（F-project-budget），**不取四算**（四算无数据）。
+  ⚠ 历史偏差：平台曾只取「服务预估成本」单列导致预算被低估，v6.2 已纠正。
+- ★切源契约：后期数据接入时，**只改实体属性 / COST_FORMULA_POLICY 的 source 字符串**，
+  Function 实现与页面契约均不变。
+
 设计原则（v1.2 总纲）：
 - TBox 机器可读、可喂 LLM；Function 只读判定，Action 写回受约束 + 不变量 + 审计。
 - 声明与实现分离：声明本文件为真相，实现经注册表 impl 绑定（pilot 绑定本地纯函数）。
@@ -83,26 +97,47 @@ ENTITIES: Dict[str, Entity] = {
         name="Project", cn="项目", kind="top",
         desc="项目（★交付执行聚合根：合同落地后的执行交付单元，支持自主/采购/分包三种模式）。"
              "里程碑、产值、交付成果围绕项目组织；财经(发票/回款/保证金/付款)不挂项目、统一归合同。"
-             "★四算(概算/预算/核算/决算)亦不挂项目——宿主是合同下的 CostBaseline，项目只作分摊维度。",
+             "★四算(概算/预算/核算/决算)亦不挂项目——宿主是合同下的 CostBaseline，项目只作分摊维度。"
+             "★v6.2 数据源决议：四算审批流与 PMO 数据尚未接入，本体属性暂一律由【项目主数据表 "
+             "md_contract】（总合同表 v2，205 列，中文列名）映射；四算/PMO 相关属性标 ⌛预留，"
+             "后期数据补齐后只改 source 即可切源（见 RESERVED_FIELDS）。",
         attributes=[
-            Attribute("project_no", "string", True, True, "core_project.project_no", "项目编号"),
-            Attribute("name", "string", True, False, "core_project.name", "项目名称"),
-            Attribute("status", "enum", False, False, "core_project.status", "执行态：进行中/已完成/关闭"),
-            Attribute("delivery_mode", "enum", False, False, "core_project.delivery_mode", "交付模式：自主实施/外购采购/分包"),
-            # ── 四算属性（★DEPRECATED-待迁移）：宿主应为 Contract 下的 CostBaseline ──
-            # 迁移时机：与成本预警切源同批。★此处保留属性本体，以维持 build_project_abox /
-            # F-project-cost-warning 不回归；待 9006 成本预警改读 CostBaseline 后方可移除。
-            # 概算是项目的属性（展示口径），★不参与成本预警判定，故不是 F-project-cost-warning 的入参
-            Attribute("estimate", "number", False, False, "(主数据)=硬件预估成本+服务预估成本",
-                      "概算(预估成本) ★DEPRECATED:权威源=CostBaseline(calc_type=概算)"),
-            Attribute("budget", "number", False, False, "plm_baseline.total_cost",
-                      "预算(概算/预算基线) ★DEPRECATED:权威源=CostBaseline(calc_type=基准预算)"),
+            Attribute("project_no", "string", True, True, 'md_contract."部门内部项目号"',
+                      "项目编号（总合同表 v2 中文列；裁剪表 core_project.project_no）"),
+            Attribute("name", "string", True, False, 'md_contract."项目描述"',
+                      "项目名称（总合同表 v2 中文列）"),
+            Attribute("contract_no", "string", False, False, 'md_contract."合同编号"',
+                      "所属合同号（★归集锚：一切财经与四算最终归集到合同）"),
+            Attribute("status", "enum", False, False, 'md_contract."合同状态"',
+                      "执行态：进行中/已完成/关闭"),
+            Attribute("delivery_mode", "enum", False, False, "",
+                      "交付模式：自主实施/外购采购/分包 ⌛预留"),
+            # ── 成本三件套（★v6.2 口径决议：预算/当前成本取主数据；概算与预估成本预留）──
+            # 预算     = 硬件集成费 + 服务预估成本 + 软件预估实施费（F-project-budget，主数据三项之和）
+            # 当前成本 = 累计实施成本实际（主数据，滞后约1月）
+            # 概算 / 预估成本：四算与 PMO 数据未接入 → ⌛预留（见 RESERVED_FIELDS）
+            # ★迁移提示：四算接入后只需改下面 budget/current_cost 的 source 字符串，
+            #   Function 与页面契约均不变（切源只改一处）。
+            Attribute("estimate", "number", False, False, "",
+                      "概算 ⌛预留：权威源=CostBaseline(calc_type=概算)，四算审批数据未接入。"
+                      "★仅展示、不参与成本预警判定（不是 F-project-cost-warning 入参）"),
+            Attribute("budget", "number", False, False,
+                      'md_contract."硬件集成费"+"服务预估成本"+"软件预估实施费"'
+                      ' ≡ core_project.accum_cost_est',
+                      "预算（≡ 累计实施成本预估，已实测等价。"
+                      "★勿用「硬件预估成本」列——那是硬件销售额，会让预算虚高约10倍。"
+                      "后期权威源=CostBaseline(calc_type=基准预算)，切源只改本行 source）"),
             Attribute("current_cost", "number", False, False,
-                      "(派生)=F-cost-rollup(ΣPayment+Σ成本明细行)",
-                      "当前成本(派生属性；★唯一权威来源=F-cost-rollup，禁止调用方自行拼装)"
-                      " ★DEPRECATED:权威源=CostBaseline(calc_type=核算)"),
-            Attribute("start_date", "date", False, False, "core_project.start_date", "开始日期"),
-            Attribute("end_date", "date", False, False, "core_project.end_date", "结束日期"),
+                      'md_contract."硬件集成费实际"+软件实际实施费+往年/当年实际服务直接/间接'
+                      ' ≡ core_project.accum_cost_actual',
+                      "当前成本（≡ 累计实施成本实际，已实测等价，滞后约1月；"
+                      "后期权威源=F-cost-rollup(Σ付款+Σ成本明细行) 或 CostBaseline(核算)）"),
+            Attribute("forecast_cost", "number", False, False, "",
+                      "预估成本 ⌛预留：权威源=Milestone.est_cost（PMO 里程碑成本预估，尚未建设）；"
+                      "过渡期可用 F-workorder-cost-rollup（Σ工单预估四分项）。"
+                      "★参与判定：有效成本 = 当前成本 + 预估成本（缺省0 → 退化为滞后口径）"),
+            Attribute("start_date", "date", False, False, "", "开始日期 ⌛预留"),
+            Attribute("end_date", "date", False, False, "", "结束日期 ⌛预留"),
         ],
         relations=["belongsTo_inv", "hasMilestone", "hasOrder", "hasWarning"],
     ),
@@ -134,14 +169,20 @@ ENTITIES: Dict[str, Entity] = {
     "Milestone": Entity(
         name="Milestone", cn="里程碑", kind="child", parent="Project",
         desc="里程碑（★挂【项目】——交付节点，产值计量的依据，供 PMO 跟踪，与回款周期关联）。"
-             "按合同付款节奏确定；★子里程碑已移除，本实体仅项目级里程碑。",
+             "按合同付款节奏确定；★子里程碑已移除，本实体仅项目级里程碑。"
+             "★v6.2：PMO 域尚未建设成本预估，est_cost 为 ⌛预留字段——"
+             "这是 Project.forecast_cost（预估成本）未来的权威来源，接入前预估成本恒缺。",
         attributes=[
-            Attribute("ms_no", "string", True, True, "milestone.ms_no", "里程碑编号"),
-            Attribute("name", "string", True, False, "milestone.name", "里程碑名称"),
-            Attribute("plan_date", "date", False, False, "milestone.plan_date", "计划日期(付款节奏)"),
-            Attribute("actual_date", "date", False, False, "milestone.actual_date", "实际日期"),
-            Attribute("status", "enum", False, False, "milestone.status", "未开始/进行中/已完成/风险"),
-            Attribute("acceptance", "string", False, False, "milestone.acceptance", "验收结论"),
+            Attribute("ms_no", "string", True, True, "", "里程碑编号 ⌛预留（md_milestone 待接入）"),
+            Attribute("name", "string", True, False, "", "里程碑名称 ⌛预留"),
+            Attribute("plan_date", "date", False, False, "", "计划日期(付款节奏) ⌛预留"),
+            Attribute("actual_date", "date", False, False, "", "实际日期 ⌛预留"),
+            Attribute("status", "enum", False, False, "", "未开始/进行中/已完成/风险 ⌛预留"),
+            Attribute("acceptance", "string", False, False, "", "验收结论 ⌛预留"),
+            # ★预估成本的权威源（PMO 域）：Σ本项目里程碑 est_cost → Project.forecast_cost
+            Attribute("est_cost", "number", False, False, "",
+                      "里程碑预估成本 ⌛预留：PMO 域成本预估的原子来源，尚未建设。"
+                      "接入后 Project.forecast_cost = Σ Milestone.est_cost（未完成里程碑部分）"),
         ],
         relations=["hasMilestone_inv", "hasOutputValue"],
     ),
@@ -348,6 +389,12 @@ ENTITIES: Dict[str, Entity] = {
                       "★四算类型：概算/基准预算/生产预算/核算/决算（候选值见模块常量 COST_BASELINE_CALC_TYPES）"),
             Attribute("contract_no", "string", False, False, "cost_baseline.contract_no",
                       "归集锚(合同号)；★概算期可空——此时合同尚未存在，Win 后回填（同 List 的双可空模式）"),
+            # ★v6.2 补：分摊维度。四算归集到合同（头），项目是分摊维度（行）。
+            # 合同:项目=1:N 时必须有此字段才能把基线成本摊到项目；当前实现 plm_baseline 用
+            # scope_type='project' 直接挂项目，迁移到合同主体后靠本字段保留原分摊关系。
+            Attribute("project_no", "string", False, False, "cost_baseline.project_no",
+                      "分摊维度(项目号·可空)：★基线归集于合同，项目只作分摊维度；"
+                      "合同1:1项目时可直接取，1:N 时按分摊比例拆（待 CostBaselineLine 落地）"),
             Attribute("producer_type", "enum", True, False, "cost_baseline.producer_type",
                       "产生者类型：Opportunity/Contract/Project（★多态：产生地 ≠ 归集地）"),
             Attribute("producer_no", "string", True, False, "cost_baseline.producer_no",
@@ -369,6 +416,7 @@ ENTITIES: Dict[str, Entity] = {
                    "supersedesBaseline", "decomposesToMilestone"],
     ),
 }
+
 
 # ── 四算类型枚举（CostBaseline.calc_type 的机器可读候选；9006 四算功能读本体取此）──
 COST_BASELINE_CALC_TYPES = ("概算", "基准预算", "生产预算", "核算", "决算")
@@ -488,24 +536,81 @@ STATUS_TO_SEVERITY: Dict[str, str] = {"预警": "预警", "超支": "严重"}
 COST_FORMULA_POLICY: Dict[str, Any] = {
     "lag_months": 1,
     "lag_note": "主数据滞后约1个月：视图月 M 看到的是 M-2 月底快照（如 8 月看 6 月底、9 月看 7 月底）",
+    # ★v6.2 数据源决议（用户拍板 2026-09-05）：四算审批流数据、PMO 里程碑成本预估均未接入，
+    # 当前唯一可用且最全的数据源是【项目主数据表 md_contract】（总合同表 v2，205 列，中文列名）。
+    # 故全部成本口径暂由 md_contract 映射；四算/PMO 相关项一律 ⌛预留（见 RESERVED_FIELDS）。
+    # ★后期切源只改本块 source 字符串，Function 实现与页面契约均不变。
+    "datasource": {
+        "primary": "md_contract",
+        "curated": "core_project",
+        "note": "md_contract=项目主数据全量表（总合同表 v2，205 列，忠实保留原始中文列名）；"
+                "core_project=裁剪回写表（既有分析页读它，由 md_import 导入时同步，保证两表一致）",
+    },
+    # ★v6.3 口径校准（2026-09-05，服务器 md_contract 631 行真实数据验证）
+    # 业务规则（语义权威，用户确认）：
+    #   预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费
+    #   成本 = 硬件集成费实际 + 软件实际实施费 + 往年/当年实际服务直接/间接
+    # 实测等价（可直接核对）：
+    #   三分量之和 57,459,764  ≡ md_contract「累计实施成本预估」57,459,794（差 30 为舍入）
+    #   六分量之和 25,246,121  ≡ md_contract「累计实施成本实际」25,246,121（完全相等）
+    # ⇒ 实现取加工字段（已在 core_project、业务方已校验），属性层保留分量定义以便审计/核对。
     "budget": {
         "formula": "硬件集成费 + 服务预估成本 + 软件预估实施费",
         "columns": {"hw_integration_fee": "硬件集成费", "service_est_cost": "服务预估成本",
                     "sw_est_impl_fee": "软件预估实施费"},
+        "source": 'md_contract."硬件集成费" + "服务预估成本" + "软件预估实施费"',
+        "impl_source": 'core_project.accum_cost_est ≡ md_contract."累计实施成本预估"',
+        "future_source": "CostBaseline(calc_type=基准预算)",
+        "note": "★坑（2026-09-05 实测，勿再犯）：md_contract 中另有「硬件预估成本」列，其值是"
+                "**硬件销售额**而非成本——占签约额 89~95%（如 CSZB2211422A 签约 2.297 亿、"
+                "该列 2.141 亿）。曾误将其当作预算分量，导致预算虚高约 10 倍、629 个项目中 "
+                "92% 被误判为「正常」，预警彻底失效。预算分量必须用「硬件集成费」。",
     },
     "cost": {
-        "formula": "硬件集成费实际 + 软件实际实施费 + 往年服务直接/间接 + 当年服务直接/间接",
+        "formula": "硬件集成费实际 + 软件实际实施费 + 往年实际服务直接/间接 + 当年实际服务直接/间接",
         "columns": {
             "hw_integration_actual": "硬件集成费实际", "sw_impl_actual": "软件实际实施费",
             "prior_svc_direct": "往年实际服务直接成本", "prior_svc_indirect": "往年实际服务间接成本",
             "curr_svc_direct": "当年实际服务直接成本", "curr_svc_indirect": "当年实际服务间接成本",
         },
+        "source": 'md_contract."硬件集成费实际" + "软件实际实施费" + 往年/当年实际服务直接/间接',
+        "impl_source": 'core_project.accum_cost_actual ≡ md_contract."累计实施成本实际"',
+        "future_source": "F-cost-rollup(ΣPayment + Σ成本明细行) 或 CostBaseline(calc_type=核算)",
+        "note": "六分量列在 md_contract 全部存在，实现取等价加工字段（业务方已校验，滞后约1月）。"
+                "收付款明细 finance_detail 虽有数据(12700行)但属**资金口径**而非成本口径，暂不采用。",
     },
     "current_remaining": "预算 − 成本 − 工单预估成本(Σ工单 人员/差旅/灵活用工/变动)",
     "out_of_scope_columns": ["软件项目分包预估成本", "软件协力分包预估/实际成本", "服务协力分包预估/实际成本",
                             "往年/当年实际培训费用", "大区/事业部项目直接/间接成本"],
     "source_function": "F-project-budget / F-project-cost / F-project-current-remaining",
 }
+
+# ── 预留字段清单（★单一真相：页面/智能体一律读取本块做「待补」标注，不得各自硬编码文案）──
+# 背景：四算审批流、PMO 里程碑成本预估、收付款明细等数据源尚未接入（2026-09-05 用户拍板）。
+# 这些字段在实体上已声明（保证 TBox 完整、后期切源不用改结构），但 source 为空、取值恒缺。
+RESERVED_FIELDS: List[Dict[str, str]] = [
+    {"entity": "Project", "field": "estimate", "cn": "概算",
+     "future_source": "CostBaseline(calc_type=概算)",
+     "blocked_by": "四算审批流数据未接入（概算需审批通过并锁定，无历史可获取）",
+     "impact": "仅展示，不参与成本预警判定（非 F-project-cost-warning 入参）"},
+    {"entity": "Project", "field": "forecast_cost", "cn": "预估成本",
+     "future_source": "Milestone.est_cost（Σ未完成里程碑）",
+     "blocked_by": "PMO 域里程碑成本预估尚未建设",
+     "impact": "预警退化为滞后口径：有效成本 = 当前成本 + 0；"
+               "接入后有效成本 = 当前成本 + 预估成本，预警更及时"},
+    {"entity": "Milestone", "field": "est_cost", "cn": "里程碑预估成本",
+     "future_source": "md_milestone（主数据里程碑全量表）",
+     "blocked_by": "PMO 域未建设，md_milestone 未导入",
+     "impact": "Project.forecast_cost 的原子来源，接入后自动汇总"},
+    {"entity": "CostBaseline", "field": "*", "cn": "四算基线（概算/预算/核算/决算）",
+     "future_source": "cost_baseline 表（○待建）",
+     "blocked_by": "四算审批流数据未接入",
+     "impact": "预算/概算当前取主数据替代理口径，四算接入后按 source 单行切换"},
+    {"entity": "Payment", "field": "*", "cn": "付款明细",
+     "future_source": "md_payment / finance_detail",
+     "blocked_by": "收付款明细未导入（finance_detail 当前 0 行）",
+     "impact": "F-cost-rollup 暂不可用，当前成本改取主数据累计实施成本实际"},
+]
 # 范围外类型（⌛ 待对应场景接入）：合同到期 / 商机停滞 / 回款逾期 / 进度延期 仅有类型占位
 
 
@@ -794,11 +899,26 @@ def project_roi(revenue: float = 0.0, current_cost: float = 0.0) -> Dict[str, An
 
 # ── 成本双口径·本体声明实现（★单一真相，分量物理列见 COST_FORMULA_POLICY）──────────
 def project_budget(hw_integration_fee: float = 0.0, service_est_cost: float = 0.0,
-                   sw_est_impl_fee: float = 0.0) -> Dict[str, Any]:
+                   sw_est_impl_fee: float = 0.0,
+                   accum_cost_est: Optional[float] = None) -> Dict[str, Any]:
     """Function F-project-budget 实现：预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费。
 
-    分量物理列见 COST_FORMULA_POLICY.budget.columns（★单一真相）。纯函数、无 IO。
+    分量物理列见 COST_FORMULA_POLICY.budget.columns（★单一真相）。
+    ★列名以总合同表 v2 主数据为准：「硬件集成费」（**不是**「硬件预估成本」——
+    后者是硬件销售额，占签约额 89~95%，误用会使预算虚高约 10 倍）。
+
+    accum_cost_est（累计实施成本预估）为上述三分量的业务加工字段，实测等价
+    （57,459,764 vs 57,459,794，差 30 为舍入）；提供该入参时直接采用，省去自行加总。
+    纯函数、无 IO。
     """
+    if accum_cost_est is not None:
+        v = round(float(accum_cost_est), 2)
+        return {
+            "budget": v,
+            "breakdown": {"accum_cost_est": v},
+            "caliber": "累计实施成本预估（≡ 硬件集成费+服务预估成本+软件预估实施费）",
+            "source_function": "F-project-budget",
+        }
     b = round(float(hw_integration_fee) + float(service_est_cost) + float(sw_est_impl_fee), 2)
     return {
         "budget": b,
@@ -1070,7 +1190,7 @@ _FUNCTION_DEFS: List[Definition] = [
     ),
     Definition(
         id="F-project-budget", name="项目预算", kind="function", domain="financial", category="聚合", produces_for=['Project'],
-        description="预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费（主数据，滞后约1月，见 COST_FORMULA_POLICY）。",
+        description="预算 = 硬件集成费 + 服务预估成本 + 软件预估实施费（主数据，滞后约1月，见 COST_FORMULA_POLICY）。※勿用「硬件预估成本」列（那是硬件销售额）；等价加工字段 accum_cost_est 可直接入参。",
         inputs=["hw_integration_fee", "service_est_cost", "sw_est_impl_fee"],
         outputs=["budget", "breakdown", "source_function"],
         invariant="budget = hw_integration_fee + service_est_cost + sw_est_impl_fee",
@@ -1319,6 +1439,8 @@ def to_spec() -> Dict[str, Any]:
         "invariants": INVARIANTS,
         # ── 本体声明的阈值策略与枚举（★单一真相：平台/智能体一律读取，不得自行硬编码）──
         "policies": {"costWarning": COST_WARNING_POLICY, "costFormula": COST_FORMULA_POLICY},
+        # ── 预留字段清单（数据源未接入、取值恒缺的字段；页面据此渲染「预留/待补」标注）──
+        "reservedFields": RESERVED_FIELDS,
         "enums": {
             "costWarningStatus": COST_WARNING_STATUS,
             "warningSeverity": WARNING_SEVERITY,

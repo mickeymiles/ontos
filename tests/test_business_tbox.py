@@ -14,12 +14,12 @@ from ontos.registry import functions
 
 
 def test_entities_v6():
-    # v6.1：4 主实体(商机/售前/合同/项目) + 交付链(里程碑/产值/订单/工单/任务/人)
-    #       + 财经链(回款/付款/发票/保证金) + 预警 = 15
+    # v6.2：4 主实体(商机/售前/合同/项目) + 交付链(里程碑/产值/订单/工单/任务/人)
+    #       + 财经链(回款/付款/发票/保证金) + 预警 + 四算主线(CostBaseline) = 16
     names = set(ENTITIES.keys())
     assert names == {"Contract", "Project", "Milestone", "Receipt", "Payment", "Warning",
                      "Order", "WorkOrder", "Task", "Person", "Opportunity", "PreSales",
-                     "OutputValue", "Invoice", "Deposit"}, names
+                     "OutputValue", "Invoice", "Deposit", "CostBaseline"}, names
     # 每个实体都有属性，且至少含唯一主键
     for name, e in ENTITIES.items():
         assert e.attributes, f"{name} 无属性"
@@ -105,7 +105,7 @@ def test_cost_rollup_model():
 def test_spec_shape():
     spec = to_spec()
     assert "entities" in spec and "links" in spec
-    assert len(spec["entities"]) == 15          # v6.1：4 主 + 交付链6 + 财经链4 + 预警
+    assert len(spec["entities"]) == 16          # v6.2：4 主 + 交付链6 + 财经链4 + 预警 + 四算基线
     # ★阈值策略与枚举由本体声明并导出（平台/智能体读取，不得自行硬编码）
     assert spec["policies"]["costWarning"]["warn_ratio"] == 0.9
     assert spec["policies"]["costWarning"]["overrun_ratio"] == 1.0
@@ -230,16 +230,29 @@ def test_cost_formula_functions():
     assert "costFormula" in spec["policies"], spec["policies"].keys()
     assert spec["policies"]["costFormula"]["budget"]["formula"] == \
         "硬件集成费 + 服务预估成本 + 软件预估实施费"
+    # v6.3：等价加工字段（业务方已校验，实现取此列避免自行加总出错）
+    b2 = functions.call("F-project-budget", accum_cost_est=3216212.0)
+    assert b2["budget"] == 3216212.0, b2
+    assert b2["caliber"].startswith("累计实施成本预估"), b2
+    # 未传 accum_cost_est 时退回三分量加总（向后兼容）
+    b3 = functions.call("F-project-budget", hw_integration_fee=100.0,
+                        service_est_cost=50.0, sw_est_impl_fee=30.0)
+    assert b3["budget"] == 180.0, b3
+    # v6.2 数据源决议与预留字段
+    assert spec["policies"]["costFormula"]["datasource"]["primary"] == "md_contract"
+    rsv = {(r["entity"], r["field"]) for r in spec["reservedFields"]}
+    assert {("Project", "estimate"), ("Project", "forecast_cost"),
+            ("Milestone", "est_cost")} <= rsv, rsv
     print("[OK] 成本双口径 Function：预算/成本/滞后剩余/工单预估/当前预估剩余 全部通过")
 
 
 def test_entities_cn_names():
-    # 全部 15 个实体必须有中文名（拓扑/页面显示，name 为稳定英文键）
+    # v6.2：全部 16 个实体必须有中文名（拓扑/页面显示，name 为稳定英文键）
     expected = {"Project": "项目", "Contract": "合同", "Milestone": "里程碑",
                 "Receipt": "回款", "Payment": "付款", "Warning": "预警",
                 "Order": "订单", "WorkOrder": "工单", "Task": "任务", "Person": "人员",
                 "Opportunity": "商机", "PreSales": "售前", "OutputValue": "产值",
-                "Invoice": "发票", "Deposit": "保证金"}
+                "Invoice": "发票", "Deposit": "保证金", "CostBaseline": "成本基线"}
     for name, e in ENTITIES.items():
         assert e.cn, f"{name} 缺中文名"
         assert e.cn == expected.get(name), f"{name} 中文名应为 {expected.get(name)}，实得 {e.cn}"
